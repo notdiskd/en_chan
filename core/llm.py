@@ -1,4 +1,4 @@
-from config import api_key, character_prompt, ai_model
+from config import api_key, ai_model
 from ollama import AsyncClient, ChatResponse
 
 class LLMClient():
@@ -9,13 +9,10 @@ class LLMClient():
             headers={'Authorization': 'Bearer ' + api_key}
         )
 
-    async def chat(self, text) -> str:
+    async def chat(self, messages: list, tools: list | None) -> str:
         response: ChatResponse = await self.client.chat(
-            model='gpt-oss:120b',
-            messages=[
-                {'role': 'system', 'content': character_prompt},
-                {'role': 'user', 'content': text},
-            ]
+            model=ai_model,
+            tools=tools,
+            messages=messages,
         )
-
-        return response["message"]["content"]
+        return response.message
