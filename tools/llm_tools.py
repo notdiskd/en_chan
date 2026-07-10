@@ -94,13 +94,21 @@ async def get_current_time() -> str:
     formatted_date = utc_now.strftime('%A, %d %B %Y, %H:%M')
     return formatted_date
 
+async def stay_silent() -> str:
+    """
+    Use it when you decide not to respond to a message — for example, the message is not addressed to you,
+    the topic is not interesting, you finished talking, or you have already checked something through another tool and realized
+    that you do not need to respond. No response will be sent after calling this function.
+    """
+    return "SILENCE_SIGNAL"
 
 # словарь имя -> функция, используется в chat-цикле для выполнения tool_calls
-TOOL_IMPLEMENTATIONS = {
+TOOL_FUNCS = {
     "web_search": web_search,
     "web_fetch": web_fetch,
     "get_current_time": get_current_time,
+    "stay_silent": stay_silent,
 }
 
 # список для передачи в tools=... — сами функции, схема сгенерируется автоматически
-TOOLS = [web_search, web_fetch, get_current_time]
+TOOLS = [web_search, web_fetch, get_current_time, stay_silent]
