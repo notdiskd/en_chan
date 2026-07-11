@@ -3,22 +3,6 @@ from fishaudio.types import TTSConfig
 from fishaudio import AsyncFishAudio
 from openai import AsyncOpenAI
 
-#олламовская шняга
-# class LLMClient():
-#     def __init__(self):
-#         self.client = AsyncClient(
-#             host="https://ollama.com",
-#             headers={'Authorization': 'Bearer ' + llm["api_key"]}
-#         )
-
-#     async def chat(self, messages: list, tools: list | None) -> str:
-#         response: ChatResponse = await self.client.chat(
-#             model=llm["ai_model"],
-#             tools=tools,
-#             messages=messages,
-#         )
-#         return response.message
-
 class LLMClient:
     def __init__(self):
         self.client = AsyncOpenAI(

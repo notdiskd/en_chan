@@ -2,7 +2,7 @@ import base64
 
 from core.ai import LLMClient, AudioClient
 from config import llm
-from tools.llm_tools import TOOLS, TOOL_FUNCS, stay_silent
+from tools.llm_tools import TOOLS, TOOL_FUNCS
 from telethon.types import User
 from tools.telegram_tools import make_send_message_tool, make_send_voice_message_tool
 from tools.tool_schema import function_to_tool
