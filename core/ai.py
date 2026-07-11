@@ -1,23 +1,45 @@
 from config import llm, fishaudio
-from ollama import AsyncClient, ChatResponse
 from fishaudio.types import TTSConfig
 from fishaudio import AsyncFishAudio
-from fishaudio.utils import save
+from openai import AsyncOpenAI
 
-class LLMClient():
+#олламовская шняга
+# class LLMClient():
+#     def __init__(self):
+#         self.client = AsyncClient(
+#             host="https://ollama.com",
+#             headers={'Authorization': 'Bearer ' + llm["api_key"]}
+#         )
+
+#     async def chat(self, messages: list, tools: list | None) -> str:
+#         response: ChatResponse = await self.client.chat(
+#             model=llm["ai_model"],
+#             tools=tools,
+#             messages=messages,
+#         )
+#         return response.message
+
+class LLMClient:
     def __init__(self):
-        self.client = AsyncClient(
-            host="https://ollama.com",
-            headers={'Authorization': 'Bearer ' + llm["api_key"]}
+        self.client = AsyncOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=llm["api_key"],
         )
 
-    async def chat(self, messages: list, tools: list | None) -> str:
-        response: ChatResponse = await self.client.chat(
+    async def chat(self, messages: list[dict], tools: list) -> dict:
+        response = await self.client.chat.completions.create(
             model=llm["ai_model"],
-            tools=tools,
             messages=messages,
+            tools=tools,
+            tool_choice="required",
+            extra_body={
+                "reasoning": {
+                    "effort": "none"
+                }
+            },
         )
-        return response.message
+
+        return response.choices[0].message
     
 class AudioClient():
     def __init__(self):

@@ -1,6 +1,9 @@
+import asyncio
+
 import httpx
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
+from tools.tool_schema import function_to_tool
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -94,21 +97,33 @@ async def get_current_time() -> str:
     formatted_date = utc_now.strftime('%A, %d %B %Y, %H:%M')
     return formatted_date
 
+async def wait(delay: float) -> str:
+    """
+    Wait for a specified amount of time.
+    Use it when you need to pause the execution for a short period.
+
+    Args:
+        delay: The number of seconds to wait. Maximum 60 seconds.
+    """
+    if delay > 60:
+        delay = 60
+    await asyncio.sleep(delay)
+    return f"Waited for {delay} seconds."
+
 async def stay_silent() -> str:
     """
-    Use it when you decide not to respond to a message — for example, the message is not addressed to you,
-    the topic is not interesting, you finished talking, or you have already checked something through another tool and realized
+    Use it when you decide not to respond to a message — for example, you finished talking, the message is not addressed to you,
+    the topic is not interesting, or you have already checked something through another tool and realized
     that you do not need to respond. No response will be sent after calling this function.
     """
     return "SILENCE_SIGNAL"
 
-# словарь имя -> функция, используется в chat-цикле для выполнения tool_calls
 TOOL_FUNCS = {
     "web_search": web_search,
     "web_fetch": web_fetch,
     "get_current_time": get_current_time,
     "stay_silent": stay_silent,
+    "wait": wait
 }
 
-# список для передачи в tools=... — сами функции, схема сгенерируется автоматически
-TOOLS = [web_search, web_fetch, get_current_time, stay_silent]
+TOOLS = [function_to_tool(fn) for fn in TOOL_FUNCS.values()]

@@ -1,5 +1,4 @@
 import asyncio
-from numpy import clip
 from telethon import TelegramClient, events
 from config import telegram
 from core.agent import Agent
@@ -24,16 +23,19 @@ class UserBot:
         print("Userbot запущен")
         await self.client.run_until_disconnected()
 
-    async def get_recent_messages(self, chat, limit: int = 20) -> list[dict]:
+    async def get_recent_messages(self, chat, limit: int = 30) -> list[dict]:
         messages = await self.client.get_messages(chat, limit=limit)
 
         formatted = []
         for msg in reversed(messages):
-            if not msg.text:
+            has_attachment = msg.photo or msg.voice
+            if not msg.raw_text and not has_attachment:
                 continue
 
+            text = ("[Voice] " if msg.voice else "") + ("[Image] " if msg.photo else "") + msg.raw_text
+
             role = "assistant" if msg.out else "user"
-            formatted.append({"role": role, "content": msg.text})
+            formatted.append({"role": role, "content": text})
 
         return formatted[:-1]
     
@@ -91,9 +93,4 @@ class UserBot:
 
         messages = await self.get_recent_messages(chat)
 
-        async with self.client.action(chat, "typing"):
-            reply_text = await self.agent.handle_message(messages, user, text=text, images=images)
-
-        if reply_text:
-            await asyncio.sleep(clip(len(reply_text) / 100, 0.3, 5))
-            await event.reply(reply_text)
+        await self.agent.handle_message(messages, user, text=text, images=images)
