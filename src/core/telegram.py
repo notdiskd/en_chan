@@ -3,6 +3,7 @@ from telethon import TelegramClient, events
 from config import telegram
 from core.agent import Agent
 from collections import defaultdict
+from datetime import datetime, timezone
 
 class UserBot:
     def __init__(self, agent: Agent):
@@ -12,14 +13,45 @@ class UserBot:
         self.on_message = agent.handle_message
         self._album_buffer: dict[int, list] = defaultdict(list)
         self._album_tasks: dict[int, asyncio.Task] = {}
+        self.commands: dict[str, callable] = {}
+
+    def register_command(self, name: str, handler):
+        self.commands[name] = handler
+
+    async def _handle_command(self, event):
+        if event.chat_id != self.my_id:
+            return
+
+        text = event.raw_text.strip()
+        if not text.startswith("."):
+            return
+
+        parts = text[1:].split(maxsplit=1)
+        cmd_name = parts[0]
+        args = parts[1] if len(parts) > 1 else ""
+
+        handler = self.commands.get(cmd_name)
+        if handler is None:
+            await event.reply(f"Unknown command: {cmd_name}")
+            return
+
+        await event.reply(f"Running: {cmd_name}...")
+        try:
+            result = await handler(args)
+            await event.reply(f"Done: {result}" if result else "Done.")
+        except Exception as e:
+            await event.reply(f"Error: {e}")
 
     async def start(self):
         await self.client.start()
         await self.client.get_dialogs()
-        self.client.add_event_handler(
-            self._handle_new_message,
-            events.NewMessage(incoming=True)
-        )
+
+        me = await self.client.get_me()
+        self.my_id = me.id
+
+        self.client.add_event_handler(self._handle_new_message, events.NewMessage(incoming=True))
+        self.client.add_event_handler(self._handle_command, events.NewMessage(outgoing=True))
+
         print("Userbot запущен")
         await self.client.run_until_disconnected()
 
@@ -94,3 +126,30 @@ class UserBot:
         messages = await self.get_recent_messages(chat)
 
         await self.agent.handle_message(messages, user, text=text, images=images)
+    
+    async def get_today_summaries(self) -> str:
+        today = datetime.now(timezone.utc).date()
+        summaries = []
+
+        async for dialog in self.client.iter_dialogs():
+            if not dialog.is_user or dialog.id == self.my_id:
+                continue
+
+            messages = await self.client.get_messages(dialog.id, limit=50)
+
+            today_messages = []
+            for msg in reversed(messages):
+                if not msg.date:
+                    continue
+                if msg.date.date() != today:
+                    continue
+                if not msg.raw_text:
+                    continue
+
+                role = "En" if msg.out else (dialog.name or "user")
+                today_messages.append(f"{role}: {msg.raw_text}")
+
+            if today_messages:
+                summaries.append(f"--- Chat with {dialog.name} ---\n" + "\n".join(today_messages))
+
+        return "\n\n".join(summaries)

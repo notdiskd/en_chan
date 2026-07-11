@@ -1,7 +1,10 @@
-/.venv
-/__pycache__
-/core/__pycache__
-/tools/__pycache__
+/src/.venv
+/src/__pycache__
+/src/core/__pycache__
+/src/tools/__pycache__
+/src/scheduler/__pycache__
+/src/storage/__pycache__
 account.session
 account.session-journal
 .env
+bot_memory.db

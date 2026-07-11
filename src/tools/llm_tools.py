@@ -1,9 +1,9 @@
 import asyncio
-
 import httpx
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 from tools.tool_schema import function_to_tool
+from storage.diary import search_diary
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -123,7 +123,8 @@ TOOL_FUNCS = {
     "web_fetch": web_fetch,
     "get_current_time": get_current_time,
     "stay_silent": stay_silent,
-    "wait": wait
+    "wait": wait,
+    "search_diary": search_diary,
 }
 
 TOOLS = [function_to_tool(fn) for fn in TOOL_FUNCS.values()]

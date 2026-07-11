@@ -26,7 +26,7 @@ class LLMClient:
             api_key=llm["api_key"],
         )
 
-    async def chat(self, messages: list[dict], tools: list) -> dict:
+    async def tool_chat(self, messages: list[dict], tools: list) -> dict:
         response = await self.client.chat.completions.create(
             model=llm["ai_model"],
             messages=messages,
@@ -37,6 +37,14 @@ class LLMClient:
                     "effort": "none"
                 }
             },
+        )
+
+        return response.choices[0].message
+    
+    async def chat(self, messages: list[dict]) -> dict:
+        response = await self.client.chat.completions.create(
+            model=llm["ai_model"],
+            messages=messages,
         )
 
         return response.choices[0].message

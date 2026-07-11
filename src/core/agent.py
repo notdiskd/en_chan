@@ -44,7 +44,7 @@ class Agent:
 
         #loop
         for _ in range(10):
-            response = await self.llm.chat(
+            response = await self.llm.tool_chat(
                 tools=tools,
                 messages=messages,
             )

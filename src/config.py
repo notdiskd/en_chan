@@ -68,3 +68,16 @@ telegram = {
     "app_id": os.getenv("TELEGRAM_APP_ID"),
     "api_hash": os.getenv("TELEGRAM_API_HASH")
 }
+
+diary = {
+    "embedding_model": "qwen/qwen3-embedding-8b",
+    "reflection_prompt": """You are En, reflecting on your day in a personal diary. Below are summaries
+of conversations you had today. Write a short diary entry (3-5 sentences,
+first person) — what stood out, how you felt, who you thought about.
+If nothing notable happened, it's fine to write a short, unremarkable entry —
+don't invent significance that wasn't there.
+
+Today's conversations:
+{summaries}
+"""
+}
