@@ -1,5 +1,7 @@
 import asyncio
 from telethon import TelegramClient, events
+from commands.registry import get_registered_commands
+import commands.definitions
 from config import telegram
 from core.agent import Agent
 from collections import defaultdict
@@ -13,7 +15,7 @@ class UserBot:
         self.on_message = agent.handle_message
         self._album_buffer: dict[int, list] = defaultdict(list)
         self._album_tasks: dict[int, asyncio.Task] = {}
-        self.commands: dict[str, callable] = {}
+        self.commands = get_registered_commands()
 
     def register_command(self, name: str, handler):
         self.commands[name] = handler
@@ -37,7 +39,7 @@ class UserBot:
 
         await event.reply(f"Running: {cmd_name}...")
         try:
-            result = await handler(args)
+            result = await handler(self, args)
             await event.reply(f"Done: {result}" if result else "Done.")
         except Exception as e:
             await event.reply(f"Error: {e}")
