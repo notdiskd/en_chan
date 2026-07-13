@@ -3,7 +3,7 @@ from storage.db import DiaryEntry, async_session
 from core.embeddings import get_embedding, cosine_similarity, serialize_embedding, deserialize_embedding
 
 SIMILARITY_THRESHOLD = 0.5
-MAX_ENTRY_CHARS = 300
+MAX_ENTRY_CHARS = 1000
 
 async def save_diary_entry(text: str, mood: str = "neutral", mentioned_users: list[int] = None) -> None:
     embedding = await get_embedding(text)

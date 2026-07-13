@@ -34,15 +34,13 @@ class Agent:
         history.append(to_insert)
         messages += history
 
-        print(messages)
-
         message_tool = make_send_message_tool(self.telegram_client, user.id)
         voice_tool = make_send_voice_message_tool(self.telegram_client, self.audio, user.id)
         tools = TOOLS + [function_to_tool(voice_tool), function_to_tool(message_tool)]
 
         msg_count = 0
 
-        #loop
+        #цикл для действий ллмки
         for _ in range(10):
             response = await self.llm.tool_chat(
                 tools=tools,
@@ -50,10 +48,6 @@ class Agent:
             )
 
             messages.append(response)
-
-            if not response.tool_calls:
-                print("оно это как вообще сделало лол")
-                return None
 
             for call in response.tool_calls:
                 fn_name = call.function.name

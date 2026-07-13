@@ -10,6 +10,7 @@ class LLMClient:
             api_key=llm["api_key"],
         )
 
+    #функция для чата с тулами
     async def tool_chat(self, messages: list[dict], tools: list) -> dict:
         response = await self.client.chat.completions.create(
             model=llm["ai_model"],
@@ -25,6 +26,7 @@ class LLMClient:
 
         return response.choices[0].message
     
+    #функция для обычного чата без тулов (пока не используется, но возможно пригодиться)
     async def chat(self, messages: list[dict]) -> dict:
         response = await self.client.chat.completions.create(
             model=llm["ai_model"],

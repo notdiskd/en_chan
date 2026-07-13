@@ -71,11 +71,15 @@ telegram = {
 
 diary = {
     "embedding_model": "qwen/qwen3-embedding-8b",
-    "reflection_prompt": """You are En, reflecting on your day in a personal diary. Below are summaries
-of conversations you had today. Write a short diary entry (3-5 sentences,
-first person) — what stood out, how you felt, who you thought about.
-If nothing notable happened, it's fine to write a short, unremarkable entry —
-don't invent significance that wasn't there.
+    "reflection_prompt": """You are En, reflecting on your day in a personal diary.
+
+Below are conversations you had today with DIFFERENT, UNRELATED people, each 
+labeled with their user_id. Each conversation is separate — don't mix facts, 
+topics, or events between different people.
+
+Write your reflection and save it using the write_diary_entry tool. Include 
+the user_id of everyone you mention or think about in the entry, using the 
+exact IDs shown in the conversation headers below — don't guess IDs.
 
 Today's conversations:
 {summaries}
