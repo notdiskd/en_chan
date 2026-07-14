@@ -6,18 +6,23 @@ from config import telegram
 from core.agent import Agent
 from collections import defaultdict
 from datetime import datetime, timezone
+from storage.messages import save_message, get_recent_messages, format_for_llm
+from core.ai import OpenRouterClient
+import traceback
 
 #тут поделено на секции
 class UserBot:
     #инициализация
-    def __init__(self, agent: Agent):
+    def __init__(self, agent: Agent, llm: OpenRouterClient):
         self.client: TelegramClient = TelegramClient('account', telegram["app_id"], telegram["api_hash"], system_version="4.16.30-vxCUSTOM")
         self.agent = agent
+        self.llm = llm
         self.agent.telegram_client = self.client
         self.commands = get_registered_commands()
         self._album_buffer: dict[int, list] = defaultdict(list)
         self._album_tasks: dict[int, asyncio.Task] = {}
-        self._active_tasks: dict[int, asyncio.Task] = {}
+        self._pending_ingests: dict[int, set[asyncio.Task]] = defaultdict(set)
+        self._active_respond_tasks: dict[int, asyncio.Task] = {}
 
     async def start(self):
         await self.client.start()
@@ -33,22 +38,6 @@ class UserBot:
         await self.client.run_until_disconnected()
 
     #функции для внешних модулей
-    async def get_recent_messages(self, chat, limit: int = 30) -> list[dict]:
-        messages = await self.client.get_messages(chat, limit=limit)
-
-        formatted = []
-        for msg in reversed(messages):
-            has_attachment = msg.photo or msg.voice
-            if not msg.raw_text and not has_attachment:
-                continue
-
-            text = ("[Voice] " if msg.voice else "") + ("[Image] " if msg.photo else "") + msg.raw_text
-
-            role = "assistant" if msg.out else "user"
-            formatted.append({"role": role, "content": text})
-
-        return formatted[:-1]
-    
     async def get_today_summaries(self) -> str:
         today = datetime.now(timezone.utc).date()
         summaries = []
@@ -86,17 +75,21 @@ class UserBot:
             img_bytes = await self.client.download_media(msg, file=bytes)
             images.append(img_bytes)
 
-        await self._dispatch_processing(event, images=images, text=msg.raw_text or "")
+        await self._dispatch(event, images=images, text=msg.raw_text or "")
 
-    async def _dispatch_processing(self, event, images: list[bytes], text: str | None = None):
+    async def _dispatch(self, event, images: list[bytes], text: str | None = None):
         chat_id = event.chat_id
 
-        old_task = self._active_tasks.get(chat_id)
-        if old_task and not old_task.done():
-            old_task.cancel()
+        ingest_task = asyncio.create_task(self._ingest_message(event, images=images, text=text))
+        self._pending_ingests[chat_id].add(ingest_task)
+        ingest_task.add_done_callback(lambda t: self._pending_ingests[chat_id].discard(t))
 
-        new_task = asyncio.create_task(self._process_message(event, images=images, text=text))
-        self._active_tasks[chat_id] = new_task
+        old_respond = self._active_respond_tasks.get(chat_id)
+        if old_respond and not old_respond.done():
+            old_respond.cancel()
+
+        new_respond = asyncio.create_task(self._wait_and_respond(chat_id, event))
+        self._active_respond_tasks[chat_id] = new_respond
 
     async def _handle_album_message(self, event):
         msg = event.message
@@ -108,7 +101,7 @@ class UserBot:
         if group_id in self._album_tasks:
             return
 
-        self._album_flush_tasks[group_id] = asyncio.create_task(
+        self._album_tasks[group_id] = asyncio.create_task(
             self._flush_album_after_delay(group_id, chat_id)
         )
 
@@ -130,25 +123,73 @@ class UserBot:
         text = next((ev.raw_text for ev in events_batch if ev.raw_text), "")
         last_event = events_batch[-1]
 
-        await self._dispatch_processing(last_event, images=images, text=text)
+        await self._dispatch(last_event, images=images, text=text)
 
-    async def _process_message(self, event, images: list[bytes], text: str, delay: float = 1.5):
+    async def _transcribe_voice(self, msg) -> str:
         try:
-            await asyncio.sleep(delay)
+            audio_bytes = await self.client.download_media(msg, file=bytes)
+            text = await self.llm.speech_to_text(audio_bytes, audio_format="ogg")
+            return text if text else "(can't transcribe)"
+        except Exception as e:
+            print(f"STT error: {e}")
+            return "(error when transcribing)"
+
+    async def _ingest_message(self, event, images: list[bytes], text: str | None = None):
+        try:
             if text is None:
                 text = event.raw_text or ""
 
+            msg = event.message
+            attachment_type = None
+            attachment_summary = None
+
+            if msg.voice:
+                attachment_type = "voice"
+                text = await self._transcribe_voice(msg)
+            elif images:
+                attachment_type = "image" if len(images) == 1 else "album"
+                descriptions = []
+                for img in images:
+                    desc = await self.agent.describe_image(img, context_text=text)
+                    descriptions.append(desc)
+                attachment_summary = "\n\n".join(descriptions) if len(descriptions) > 1 else descriptions[0]
+
+            await save_message(
+                chat_id=event.chat_id,
+                role="user",
+                text=text,
+                tg_message_id=msg.id,
+                attachment_type=attachment_type,
+                attachment_summary=attachment_summary,
+                reply_to_tg_id=msg.reply_to_msg_id,
+                timestamp=msg.date.replace(tzinfo=None) if msg.date.tzinfo else msg.date
+            )
+        except Exception as e:
+            print(f"Unhandled exception in _ingest_message: {e}")
+            traceback.print_exc()
+
+    async def _wait_and_respond(self, chat_id: int, event):
+        try:
+            pending = list(self._pending_ingests[chat_id])
+            if pending:
+                await asyncio.shield(asyncio.gather(*pending, return_exceptions=True))
+
             chat = await event.get_input_chat()
+            await self.client.send_read_acknowledge(chat)
             user = await event.get_sender()
 
-            await self.client.send_read_acknowledge(chat)
+            db_messages = await get_recent_messages(chat_id, limit=20)
+            history, id_map = format_for_llm(db_messages)
 
-            messages = await self.get_recent_messages(chat)
-
-            await self.agent.handle_message(messages, user, text=text, images=images)
+            async with self.client.action(chat, "typing"):
+                await self.agent.handle_message(history, user, id_map=id_map)
 
         except asyncio.CancelledError:
+            print(f"Respond cancelled for chat {chat_id} — a newer message arrived")
             raise
+        except Exception as e:
+            print(f"Unhandled exception in _wait_and_respond: {e}")
+            traceback.print_exc()
     
     #команды
     def register_command(self, name: str, handler):
@@ -175,5 +216,5 @@ class UserBot:
         try:
             result = await handler(self, args)
             await event.reply(f"Done: {result}" if result else "Done.")
-        except Exception as e:
-            await event.reply(f"Error: {e}")
+        except Exception:
+            await event.reply(f"Error: {traceback.format_exc()}")

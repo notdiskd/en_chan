@@ -1,19 +1,24 @@
-from config import llm, fishaudio
+from config import openrouter, fishaudio
 from fishaudio.types import TTSConfig
 from fishaudio import AsyncFishAudio
 from openai import AsyncOpenAI
+import base64
+import httpx
 
-class LLMClient:
+class OpenRouterClient():
     def __init__(self):
+        self._api_key = openrouter["api_key"]
         self.client = AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
-            api_key=llm["api_key"],
+            api_key=self._api_key,
         )
+        self.chat_model = openrouter["chat_model"]
+        self.embedding_model = openrouter["embedding_model"]
+        self.transcription_model = openrouter["transcription_model"]
 
-    #функция для чата с тулами
     async def tool_chat(self, messages: list[dict], tools: list) -> dict:
         response = await self.client.chat.completions.create(
-            model=llm["ai_model"],
+            model=self.chat_model,
             messages=messages,
             tools=tools,
             tool_choice="required",
@@ -26,16 +31,38 @@ class LLMClient:
 
         return response.choices[0].message
     
-    #функция для обычного чата без тулов (пока не используется, но возможно пригодиться)
     async def chat(self, messages: list[dict]) -> dict:
         response = await self.client.chat.completions.create(
-            model=llm["ai_model"],
+            model=self.chat_model,
             messages=messages,
         )
 
         return response.choices[0].message
     
-class AudioClient():
+    async def get_embedding(self, text: str) -> list[float]:
+        response = await self.client.embeddings.create(
+            model=self.embedding_model,
+            input=text,
+        )
+
+        return response.data[0].embedding
+    
+    async def speech_to_text(self, audio_bytes: bytes, audio_format: str = "ogg") -> str:
+        audio_b64 = base64.b64encode(audio_bytes).decode()
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                "https://openrouter.ai/api/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json={
+                    "model": self.transcription_model,
+                    "input_audio": {"data": audio_b64, "format": audio_format},
+                },
+            )
+            resp.raise_for_status()
+            return resp.json().get("text", "")
+    
+class FishAudioClient():
     def __init__(self):
         self.client = AsyncFishAudio(api_key=fishaudio["api_key"])
 

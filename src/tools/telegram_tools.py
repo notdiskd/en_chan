@@ -1,16 +1,17 @@
 import io
 from telethon import TelegramClient
-from core.ai import AudioClient
+from core.ai import FishAudioClient
 import asyncio
 from mutagen.oggopus import OggOpus
+from storage.messages import save_message
 
 def _get_duration(audio_bytes: bytes) -> float:
     file_like = io.BytesIO(audio_bytes)
     audio = OggOpus(file_like)
     return audio.info.length
 
-def make_send_voice_message_tool(tg_client: TelegramClient, audio_client: AudioClient, chat_id: int):
-    async def send_voice_message(text: str) -> str:
+def make_send_voice_message_tool(client: TelegramClient, audio: FishAudioClient, chat_id: int, id_map: dict[int, int], **kwargs):
+    async def send_voice_message(text: str, reply_to: int | None = None) -> str:
         """
         Convert text to speech and send it as a voice message (max 60 seconds) in current chat.
         Use it when you want to respond with your voice, for example, for a more emotional or informal moment.
@@ -22,43 +23,62 @@ def make_send_voice_message_tool(tg_client: TelegramClient, audio_client: AudioC
 
         Args:
             text: Text to convert to speech.
+            reply_to: Optional message number (e.g. 3) to reply to directly. Leave empty for a normal message.
         """
-        try:
-            opus_bytes = await audio_client.text_to_speech(text)
+        kwargs_send = {}
+        if reply_to is not None:
+            tg_id = id_map.get(reply_to)
+            if tg_id:
+                kwargs_send["reply_to"] = tg_id
 
-            file = io.BytesIO(opus_bytes)
-            file.name = "voice.ogg"
+        opus_bytes = await audio.text_to_speech(text)
 
-            length = _get_duration(opus_bytes)
-            if length > 60:
-                raise Exception(f"Voice message is too long.")
-            async with tg_client.action(chat_id, "record-audio"):
-                await asyncio.sleep(length)
-            async with tg_client.action(chat_id, "audio"):
-                await tg_client.send_file(chat_id, file, voice_note=True, caption=text)
-            return "Voice message is sent."
-        except Exception as e:
-            return f"Error sending voice message: {e}"
+        file = io.BytesIO(opus_bytes)
+        file.name = "voice.ogg"
+
+        length = _get_duration(opus_bytes)
+        if length > 60:
+            raise Exception(f"Voice message is too long.")
+        async with client.action(chat_id, "record-audio"):
+            await asyncio.sleep(length)
+        async with client.action(chat_id, "audio"):
+            sent = await client.send_file(chat_id, file, voice_note=True, **kwargs_send)
+        await save_message(chat_id=chat_id, role="assistant", text=text, tg_message_id=sent.id, attachment_type="voice", reply_to_tg_id=kwargs_send.get("reply_to"))
+        return "Voice message is sent."
 
     return send_voice_message
 
-def make_send_message_tool(client: TelegramClient, chat_id: int):
-    async def send_message(text: str) -> str:
+def make_send_message_tool(client: TelegramClient, chat_id: int, id_map: dict[int, int], **kwargs):
+    async def send_message(text: str, reply_to: int | None = None) -> str:
         """
-        Send a text message to the current chat. Can be called multiple times
-        in a row if you want to send several separate messages — like a real
-        person continuing a thought across multiple replies. Each call is a
-        separate message.
+        Send a text message to the current chat. Optionally reply directly to 
+        a specific earlier message using its number (shown as #N in the 
+        conversation history) — useful when responding to something specific 
+        that isn't the most recent message.
 
         Args:
             text: The message text to send
+            reply_to: Optional message number (e.g. 3) to reply to directly. Leave empty for a normal message.
         """
         typing_time = min(max(len(text) / 5, 0.8), 4.0)
-
         async with client.action(chat_id, "typing"):
             await asyncio.sleep(typing_time)
 
-        await client.send_message(chat_id, text)
-        return "Message sent."
+        kwargs_send = {}
+        if reply_to is not None:
+            try:
+                reply_to = int(reply_to)
+            except (ValueError, TypeError):
+                reply_to = None
+            tg_id = id_map.get(reply_to)
+            if tg_id:
+                kwargs_send["reply_to"] = tg_id
 
+        sent = await client.send_message(chat_id, text, **kwargs_send)
+        await save_message(chat_id=chat_id, role="assistant", text=text, tg_message_id=sent.id, reply_to_tg_id=kwargs_send.get("reply_to"))
+
+        return "Message sent."
+    
     return send_message
+
+TG_TOOLS = [make_send_message_tool, make_send_voice_message_tool]

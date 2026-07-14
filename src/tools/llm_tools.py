@@ -3,7 +3,6 @@ import httpx
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 from tools.tool_schema import function_to_tool
-from storage.diary import search_diary
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -20,6 +19,8 @@ async def web_search(query: str, max_results: int = 5) -> str:
         query: Search query in natural language
         max_results: How many results to return
     """
+    max_results = int(max_results)
+
     url = "https://html.duckduckgo.com/html/"
 
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -105,6 +106,8 @@ async def wait(delay: float) -> str:
     Args:
         delay: The number of seconds to wait. Maximum 60 seconds.
     """
+    delay = float(delay)
+
     if delay > 60:
         delay = 60
     await asyncio.sleep(delay)
@@ -118,13 +121,12 @@ async def stay_silent() -> str:
     """
     return "SILENCE_SIGNAL"
 
-TOOL_FUNCS = {
+TOOL_IMPLS = {
     "web_search": web_search,
     "web_fetch": web_fetch,
     "get_current_time": get_current_time,
     "stay_silent": stay_silent,
     "wait": wait,
-    "search_diary": search_diary,
 }
 
-TOOLS = [function_to_tool(fn) for fn in TOOL_FUNCS.values()]
+TOOLS = [function_to_tool(fn) for fn in TOOL_IMPLS.values()]
