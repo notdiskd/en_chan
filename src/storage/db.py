@@ -1,19 +1,41 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON, LargeBinary, BigInteger
+from sqlalchemy import Column, Integer, String, DateTime, BigInteger, JSON, LargeBinary, Float
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from datetime import datetime, timezone
 
 Base = declarative_base()
 
-class DiaryEntry(Base):
-    __tablename__ = "diary_entries"
+
+class MemoryEntry(Base):
+    __tablename__ = "memory_entries"
 
     id = Column(Integer, primary_key=True)
-    date = Column(DateTime, default=datetime.now(timezone.utc))
+    type = Column(String, index=True) #"reflection", "fact", "event"
     text = Column(String)
-    mood = Column(String, nullable=True)
-    mentioned_users = Column(JSON, default=list)
     embedding = Column(LargeBinary)
+    user_id = Column(BigInteger, nullable=True, index=True)
+    importance = Column(Float, default=0.5)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    meta = Column(JSON, default=dict)
+
+
+class CoreMemory(Base):
+    __tablename__ = "core_memory"
+
+    id = Column(Integer, primary_key=True, default=1) #эта строка всегда только одна существует
+    content = Column(String, default="")
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class Reminder(Base):
+    __tablename__ = "reminders"
+
+    id = Column(Integer, primary_key=True)
+    due_date = Column(DateTime(timezone=True))
+    note = Column(String)
+    user_id = Column(BigInteger, nullable=True)
+    fired = Column(String, default="") #пусто или timestamp срабатывания
+
 
 class Message(Base):
     __tablename__ = "messages"
@@ -28,9 +50,17 @@ class Message(Base):
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     reply_to_tg_id = Column(BigInteger, nullable=True)
 
+
 engine = create_async_engine("sqlite+aiosqlite:///./bot_memory.db")
 async_session = async_sessionmaker(engine, expire_on_commit=False)
+
 
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    async with async_session() as session:
+        existing = await session.get(CoreMemory, 1)
+        if existing is None:
+            session.add(CoreMemory(id=1, content=""))
+            await session.commit()

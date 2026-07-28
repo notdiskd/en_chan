@@ -5,19 +5,19 @@ from tools.llm_tools import TOOLS, TOOL_IMPLS
 from telethon.types import User
 from tools.telegram_tools import TG_TOOLS
 from tools.tool_schema import function_to_tool
-from storage.diary import Diary
+from storage.memory import Memory
+from tools.memory_tools import make_search_memory_tool, make_core_memory_tools
 import json
 
 ACTION_TOOL_NAMES = ("send_message", "send_voice_message", "stay_silent", "wait")
 MAX_INFO_CALLS = 7
 
 class Agent:
-    def __init__(self, llm: OpenRouterClient, audio: FishAudioClient, diary: Diary):
+    def __init__(self, llm: OpenRouterClient, audio: FishAudioClient, memory: Memory):
         self.llm = llm
         self.audio = audio
-        self.diary = diary
+        self.memory = memory
         self.telegram_client = None
-        self.history: dict[int, list[dict]] = {}
 
     async def describe_image(self, image_bytes: bytes, context_text: str = "") -> str:
         b64 = base64.b64encode(image_bytes).decode()
@@ -39,23 +39,34 @@ class Agent:
 
     async def handle_message(self, history: str, user: User, id_map: dict[int, int]) -> str:
         name = f"{user.first_name} {user.last_name}" if user.last_name else user.first_name
+
+        core_content = await self.memory.get_core()
+        last_user_text = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
+        auto_context = await self.memory.auto_retrieve(last_user_text, user_id=user.id) if last_user_text else None
+
         messages=[
             {'role': 'system', 'content': prompts["character_prompt"]},
             {'role': 'system', 'content': f"You're chatting with a user named \"{name}\", who has the username \"{user.username}\" and ID \"{user.id}\"."},
         ]
 
+        if core_content:
+            messages.append({"role": "system", "content": f"Things you always keep in mind:\n{core_content}"})
+        if auto_context:
+            messages.append({"role": "system", "content": auto_context})
         messages += history
 
-        print(messages)
-
-        search_diary_tool = self.diary.search_diary
+        print(messages[1:])
 
         tg_context = {"client": self.telegram_client, "chat_id": user.id, "audio": self.audio, "id_map": id_map}
         tg_tool_fns = [factory(**tg_context) for factory in TG_TOOLS]
 
-        dynamic_impls = {fn.__name__: fn for fn in tg_tool_fns}
-        dynamic_impls[search_diary_tool.__name__] = search_diary_tool
-        dynamic_schema = [function_to_tool(fn) for fn in tg_tool_fns] + [function_to_tool(search_diary_tool)]
+        search_memory_tool = make_search_memory_tool(self.memory)
+        core_append, core_replace = make_core_memory_tools(self.memory)
+        memory_tool_fns = [search_memory_tool, core_append, core_replace]
+
+        dynamic_fns = tg_tool_fns + memory_tool_fns
+        dynamic_impls = {fn.__name__: fn for fn in dynamic_fns}
+        dynamic_schema = [function_to_tool(fn) for fn in dynamic_fns]
 
         all_tool_impls = {**TOOL_IMPLS, **dynamic_impls}
         all_tools_schema = TOOLS + dynamic_schema
@@ -72,6 +83,10 @@ class Agent:
 
             response = await self.llm.tool_chat(tools=available, messages=messages)
             messages.append(response)
+
+            if not response.tool_calls:
+                print("stop")
+                return None
 
             for call in response.tool_calls:
                 fn_name = call.function.name

@@ -181,8 +181,7 @@ class UserBot:
             db_messages = await get_recent_messages(chat_id, limit=20)
             history, id_map = format_for_llm(db_messages)
 
-            async with self.client.action(chat, "typing"):
-                await self.agent.handle_message(history, user, id_map=id_map)
+            await self.agent.handle_message(history, user, id_map=id_map)
 
         except asyncio.CancelledError:
             print(f"Respond cancelled for chat {chat_id} — a newer message arrived")
