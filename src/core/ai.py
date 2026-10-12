@@ -16,12 +16,12 @@ class OpenRouterClient():
         self.embedding_model = openrouter["embedding_model"]
         self.transcription_model = openrouter["transcription_model"]
 
-    async def tool_chat(self, messages: list[dict], tools: list) -> dict:
+    async def tool_chat(self, messages: list[dict], tools: list, tool_choice: str = "required") -> dict:
         response = await self.client.chat.completions.create(
             model=self.chat_model,
             messages=messages,
             tools=tools,
-            tool_choice="required",
+            tool_choice=tool_choice,
             extra_body={
                 "reasoning": {
                     "effort": "none"

@@ -50,7 +50,7 @@ class UserBot:
 
             today_messages = []
             for msg in reversed(messages):
-                if not msg.date or msg.date.date() != today or not msg.raw_text:
+                if not msg.date or msg.date.astimezone(timezone.utc).date() != today or not msg.raw_text:
                     continue
 
                 role = "En" if msg.out else (dialog.name or "user")
@@ -162,7 +162,7 @@ class UserBot:
                 attachment_type=attachment_type,
                 attachment_summary=attachment_summary,
                 reply_to_tg_id=msg.reply_to_msg_id,
-                timestamp=msg.date.replace(tzinfo=None) if msg.date.tzinfo else msg.date
+                timestamp=msg.date
             )
         except Exception as e:
             print(f"Unhandled exception in _ingest_message: {e}")

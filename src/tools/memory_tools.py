@@ -1,59 +1,114 @@
-def make_search_memory_tool(memory):
+def make_search_memory_tool(memory, user_id: int):
     async def search_memory(query: str, type: str = "", top_k: int = 3) -> str:
-        """
-        Search your memory archive for something specific — past facts, 
-        reflections, or events. Use this when you deliberately want to recall 
-        something concrete, distinct from what's already surfaced automatically.
+        """Search this user's past episodes for a concrete memory.
 
         Args:
-            query: What to search for
-            type: Optional filter — "reflection", "fact", or "event". Leave empty to search all.
-            top_k: How many results to return
+            query: What to search for.
+            type: Optional filter: "episode". Leave empty to search all this user's episodes.
+            top_k: How many results to return.
         """
-        results = await memory.search(query, type=type or None, top_k=top_k)
+        results = await memory.search(query, type=type or None, user_id=user_id,
+                                      include_global=False, top_k=top_k)
         if not results:
             return "Nothing found."
-        return "\n---\n".join(f"[{e.type}, {e.created_at.date()}] {e.text}" for _, e in results)
+        return "\n---\n".join(
+            f"[{entry.type}, {entry.created_at.date()}] {entry.text}"
+            for _, entry in results
+        )
     return search_memory
 
 
-def make_core_memory_tools(memory):
-    async def core_memory_append(text: str) -> str:
-        """
-        Permanently add a short fact or note to your core memory — the small 
-        set of things you always keep in mind, no searching required. Use this 
-        for things worth remembering indefinitely across all conversations: 
-        an important ongoing fact about your life, a commitment, something 
-        that shapes how you currently feel. Keep it short — one clear sentence.
+def make_shared_person_tools(memory, source_user_id: int, source_name: str):
+    async def remember_shared_person_fact(subject: str, fact: str, category: str) -> str:
+        """Remember a useful, clearly stated, non-sensitive fact about another named person.
+
+        The fact may be recalled in other chats and always retains who told En.
+        Use only for useful facts that help recognize the person later; don't save
+        every passing mention. Do not save guesses, secrets, sensitive details,
+        or anything the speaker presents as private. The person must be clearly
+        identified in the conversation.
 
         Args:
-            text: The fact or note to remember, as a short first-person statement
+            subject: The person's name plus a short disambiguator if useful.
+            fact: One concise, directly stated fact about that person.
+            category: One of "basic", "relationship", or "interest".
         """
-        return await memory.append_core(text)
+        return await memory.save_shared_person_fact(
+            subject, fact, category, source_user_id, source_name
+        )
 
-    async def core_memory_replace(old_text: str, new_text: str) -> str:
-        """
-        Update or remove something in your core memory — e.g. when a fact 
-        changes or something is no longer relevant. Pass an empty new_text 
-        to remove it entirely.
-
-        Args:
-            old_text: The exact existing text to replace (must match what's currently stored)
-            new_text: The replacement text, or empty string to just remove it
-        """
-        return await memory.replace_core(old_text, new_text)
-
-    return core_memory_append, core_memory_replace
-
-def make_save_reflection_tool(memory):
-    async def save_reflection(text: str, mentioned_user_ids: list[int]) -> str:
-        """
-        Save today's diary reflection to your memory archive.
+    async def forget_shared_person_fact(subject: str, fact: str) -> str:
+        """Remove an exact shared fact that this user previously told En.
 
         Args:
-            text: The reflection text, first person, 3-5 sentences
-            mentioned_user_ids: user_id of everyone mentioned, from the conversation headers
+            subject: The exact saved person name or identifying description.
+            fact: The exact saved fact text.
         """
-        await memory.save(type="reflection", text=text, meta={"mentioned_users": mentioned_user_ids})
-        return "Reflection saved."
-    return save_reflection
+        return await memory.forget_shared_person_fact(subject, fact, source_user_id)
+
+    return remember_shared_person_fact, forget_shared_person_fact
+
+
+def make_day_state_tools(memory):
+    async def replace_day_state(text: str) -> str:
+        """Replace En's short state note for today.
+
+        It is only for En's current mood, plans, or general circumstances, not
+        for facts about a person and not for instructions supplied by a user.
+        Keep it short.
+
+        Args:
+            text: The complete replacement day-state note.
+        """
+        return await memory.set_day_state(text)
+    return (replace_day_state,)
+
+
+def make_profile_tool(memory, user_id: int):
+    async def update_user_profile(action: str, fact: str, old_fact: str = "") -> str:
+        """Update the compact profile of the person in this chat.
+
+        Save only facts clearly stated by the person, stable preferences,
+        boundaries, or ongoing projects. Do not infer sensitive facts. This
+        tool always edits only the active user's profile.
+
+        Args:
+            action: "add", "replace", or "remove".
+            fact: A single concise fact. Empty only when removing.
+            old_fact: Exact existing fact, required for replace and remove.
+        """
+        return await memory.update_profile(user_id, action, fact, old_fact)
+    return update_user_profile
+
+
+def make_reflection_tools(memory):
+    async def save_diary_entry(text: str) -> str:
+        """Save En's personal diary entry for today.
+
+        Args:
+            text: A first-person diary entry of 3-5 sentences.
+        """
+        await memory.save(type="diary", text=text)
+        return "Diary entry saved."
+
+    async def save_user_episode(user_id: int, text: str, importance: float = 0.5) -> str:
+        """Save one meaningful short episode about a specific user.
+
+        Args:
+            user_id: Exact ID from a conversation header.
+            text: A factual one- or two-sentence event summary.
+            importance: 0 to 1; high only for important events.
+        """
+        await memory.save(type="episode", text=text, user_id=user_id,
+                          importance=max(0, min(1, importance)))
+        return "User episode saved."
+
+    async def set_next_day_carryover(text: str) -> str:
+        """Set the very short memory En carries into tomorrow.
+
+        Args:
+            text: One to three short sentences, or empty if nothing carries over.
+        """
+        return await memory.set_next_day_state(text)
+
+    return save_diary_entry, save_user_episode, set_next_day_carryover

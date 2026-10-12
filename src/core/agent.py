@@ -6,7 +6,8 @@ from telethon.types import User
 from tools.telegram_tools import TG_TOOLS
 from tools.tool_schema import function_to_tool
 from storage.memory import Memory
-from tools.memory_tools import make_search_memory_tool, make_core_memory_tools
+from tools.memory_tools import (make_search_memory_tool, make_day_state_tools,
+                                make_profile_tool, make_shared_person_tools)
 import json
 
 ACTION_TOOL_NAMES = ("send_message", "send_voice_message", "stay_silent", "wait")
@@ -40,7 +41,8 @@ class Agent:
     async def handle_message(self, history: str, user: User, id_map: dict[int, int]) -> str:
         name = f"{user.first_name} {user.last_name}" if user.last_name else user.first_name
 
-        core_content = await self.memory.get_core()
+        day_state = await self.memory.get_day_state()
+        profile = await self.memory.format_profile(user.id)
         last_user_text = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
         auto_context = await self.memory.auto_retrieve(last_user_text, user_id=user.id) if last_user_text else None
 
@@ -49,8 +51,10 @@ class Agent:
             {'role': 'system', 'content': f"You're chatting with a user named \"{name}\", who has the username \"{user.username}\" and ID \"{user.id}\"."},
         ]
 
-        if core_content:
-            messages.append({"role": "system", "content": f"Things you always keep in mind:\n{core_content}"})
+        if day_state:
+            messages.append({"role": "system", "content": f"Your state for today:\n{day_state}"})
+        if profile:
+            messages.append({"role": "system", "content": f"Facts about this user:\n{profile}"})
         if auto_context:
             messages.append({"role": "system", "content": auto_context})
         messages += history
@@ -60,9 +64,12 @@ class Agent:
         tg_context = {"client": self.telegram_client, "chat_id": user.id, "audio": self.audio, "id_map": id_map}
         tg_tool_fns = [factory(**tg_context) for factory in TG_TOOLS]
 
-        search_memory_tool = make_search_memory_tool(self.memory)
-        core_append, core_replace = make_core_memory_tools(self.memory)
-        memory_tool_fns = [search_memory_tool, core_append, core_replace]
+        search_memory_tool = make_search_memory_tool(self.memory, user.id)
+        replace_day_state, = make_day_state_tools(self.memory)
+        update_profile = make_profile_tool(self.memory, user.id)
+        shared_person_tools = make_shared_person_tools(self.memory, user.id, name)
+        memory_tool_fns = [search_memory_tool, replace_day_state, update_profile,
+                           *shared_person_tools]
 
         dynamic_fns = tg_tool_fns + memory_tool_fns
         dynamic_impls = {fn.__name__: fn for fn in dynamic_fns}

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, BigInteger, JSON, LargeBinary, Float
+from sqlalchemy import Column, Integer, String, DateTime, Date, BigInteger, JSON, LargeBinary, Float
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from datetime import datetime, timezone
@@ -10,7 +10,7 @@ class MemoryEntry(Base):
     __tablename__ = "memory_entries"
 
     id = Column(Integer, primary_key=True)
-    type = Column(String, index=True) #"reflection", "fact", "event"
+    type = Column(String, index=True)
     text = Column(String)
     embedding = Column(LargeBinary)
     user_id = Column(BigInteger, nullable=True, index=True)
@@ -19,22 +19,35 @@ class MemoryEntry(Base):
     meta = Column(JSON, default=dict)
 
 
-class CoreMemory(Base):
-    __tablename__ = "core_memory"
+class DayState(Base):
+    __tablename__ = "day_state"
 
-    id = Column(Integer, primary_key=True, default=1) #эта строка всегда только одна существует
+    id = Column(Integer, primary_key=True, default=1) # эта строка всегда только одна существует
     content = Column(String, default="")
+    state_date = Column(Date, nullable=True)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
-class Reminder(Base):
-    __tablename__ = "reminders"
+class UserProfile(Base):
+    __tablename__ = "user_profiles"
+
+    user_id = Column(BigInteger, primary_key=True)
+    facts = Column(JSON, default=list)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class SharedPersonFact(Base):
+    """A neutral fact about a named person, with its conversational source."""
+    __tablename__ = "shared_person_facts"
 
     id = Column(Integer, primary_key=True)
-    due_date = Column(DateTime(timezone=True))
-    note = Column(String)
-    user_id = Column(BigInteger, nullable=True)
-    fired = Column(String, default="") #пусто или timestamp срабатывания
+    subject = Column(String, index=True)
+    fact = Column(String)
+    category = Column(String, index=True)
+    source_user_id = Column(BigInteger, index=True)
+    source_name = Column(String, default="")
+    embedding = Column(LargeBinary)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class Message(Base):
@@ -60,7 +73,7 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
 
     async with async_session() as session:
-        existing = await session.get(CoreMemory, 1)
+        existing = await session.get(DayState, 1)
         if existing is None:
-            session.add(CoreMemory(id=1, content=""))
+            session.add(DayState(id=1, content=""))
             await session.commit()

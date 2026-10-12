@@ -4,7 +4,6 @@ from core.agent import Agent
 from core.telegram import UserBot
 from storage.memory import Memory
 from storage.db import init_db
-from storage.reminders import schedule_reminder_checks
 
 async def main():
     await init_db()
@@ -18,7 +17,6 @@ async def main():
     bot = UserBot(agent, llm)
 
     asyncio.create_task(memory.schedule_daily_reflection(get_day_summaries_fn=bot.get_today_summaries))
-    asyncio.create_task(schedule_reminder_checks(bot))
 
     await bot.start()
 
