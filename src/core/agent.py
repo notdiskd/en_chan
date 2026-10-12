@@ -1,4 +1,5 @@
 import base64
+from datetime import datetime, timezone
 from core.ai import OpenRouterClient, FishAudioClient
 from config import prompts
 from tools.llm_tools import TOOLS, TOOL_IMPLS
@@ -11,6 +12,7 @@ from tools.memory_tools import (make_search_memory_tool, make_day_state_tools,
 import json
 
 ACTION_TOOL_NAMES = ("send_message", "send_voice_message", "stay_silent", "wait")
+THINK_TOOL_NAME = "think"
 MAX_INFO_CALLS = 7
 
 class Agent:
@@ -45,9 +47,11 @@ class Agent:
         profile = await self.memory.format_profile(user.id)
         last_user_text = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
         auto_context = await self.memory.auto_retrieve(last_user_text, user_id=user.id) if last_user_text else None
+        current_date = datetime.now(timezone.utc).strftime("%A, %d %B %Y, %H:%M (UTC)")
 
         messages=[
             {'role': 'system', 'content': prompts["character_prompt"]},
+            {"role": "system", "content": f"Today's date is {current_date}. Use it to interpret relative dates."},
             {'role': 'system', 'content': f"You're chatting with a user named \"{name}\", who has the username \"{user.username}\" and ID \"{user.id}\"."},
         ]
 
@@ -80,12 +84,16 @@ class Agent:
 
         info_call_count = 0
         msg_count = 0
+        think_call_count = 0
 
         #цикл для действий ллмки
         for _ in range(10):
             available = [
                 t for t in all_tools_schema
-                if info_call_count < MAX_INFO_CALLS or t["function"]["name"] in ACTION_TOOL_NAMES
+                if (info_call_count < MAX_INFO_CALLS
+                    or t["function"]["name"] in ACTION_TOOL_NAMES
+                    or t["function"]["name"] == THINK_TOOL_NAME)
+                and (t["function"]["name"] != THINK_TOOL_NAME or think_call_count == 0)
             ]
 
             response = await self.llm.tool_chat(tools=available, messages=messages)
@@ -95,10 +103,39 @@ class Agent:
                 print("stop")
                 return None
 
+            # Give the model a separate turn to review its plan before any
+            # other tool call from the same response is allowed to execute.
+            allowed_names = {t["function"]["name"] for t in available}
+            think_call = next(
+                (call for call in response.tool_calls
+                 if call.function.name == THINK_TOOL_NAME and call.function.name in allowed_names),
+                None,
+            )
+            if think_call is not None:
+                think_args = json.loads(think_call.function.arguments)
+                think_fn = all_tool_impls[THINK_TOOL_NAME]
+                try:
+                    think_result = await think_fn(**think_args)
+                except Exception as e:
+                    print(f"Tool '{THINK_TOOL_NAME}' raised an exception: {e}")
+                    think_result = "Error recording the plan. Continue with the next appropriate tool."
+                think_call_count += 1
+
+                for call in response.tool_calls:
+                    if call.id == think_call.id:
+                        result = think_result
+                    else:
+                        result = "Deferred: review the plan first, then make this tool call in the next turn if it is still needed."
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": str(result),
+                    })
+                continue
+
             for call in response.tool_calls:
                 fn_name = call.function.name
 
-                allowed_names = {t["function"]["name"] for t in available}
                 if fn_name not in allowed_names:
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": f"'{fn_name}' wasn't available this turn."})
                     continue

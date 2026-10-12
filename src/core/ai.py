@@ -22,6 +22,7 @@ class OpenRouterClient():
             messages=messages,
             tools=tools,
             tool_choice=tool_choice,
+            parallel_tool_calls=False,
             extra_body={
                 "reasoning": {
                     "effort": "none"

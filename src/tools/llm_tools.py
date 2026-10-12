@@ -1,7 +1,6 @@
 import asyncio
 import httpx
 from bs4 import BeautifulSoup
-from datetime import datetime, timezone
 from tools.tool_schema import function_to_tool
 
 HEADERS = {
@@ -90,13 +89,20 @@ async def web_fetch(url: str) -> str:
     return clean_text
 
 
-async def get_current_time() -> str:
+async def think(plan: str) -> str:
+    """Record a brief internal plan before a non-trivial task.
+
+    Use this at most once per user turn, only when deciding the next steps
+    would benefit from a pause. This does not send anything to the user.
+
+    Args:
+        plan: One to three short actionable steps, not detailed private reasoning.
     """
-    Get current full date and time in UTC timezone.
-    """
-    utc_now = datetime.now(timezone.utc)
-    formatted_date = utc_now.strftime('%A, %d %B %Y, %H:%M')
-    return formatted_date
+    plan = plan.strip()
+    if not plan:
+        return "No plan was recorded. Continue with the next appropriate tool."
+    return "Plan recorded for this turn. Review it, then call the next appropriate tool."
+
 
 async def wait(delay: float) -> str:
     """
@@ -115,16 +121,16 @@ async def wait(delay: float) -> str:
 
 async def stay_silent() -> str:
     """
-    Use it when you decide not to respond to a message — for example, you finished talking, the message is not addressed to you,
-    the topic is not interesting, or you have already checked something through another tool and realized
-    that you do not need to respond. No response will be sent after calling this function.
+    End the current response chain without sending another message. Use it either when no reply is needed,
+    or after sending the final message in a reply. Calling it after a sent message does not undo that
+    message; it only tells the application that En is done for this turn.
     """
     return "SILENCE_SIGNAL"
 
 TOOL_IMPLS = {
     "web_search": web_search,
     "web_fetch": web_fetch,
-    "get_current_time": get_current_time,
+    "think": think,
     "stay_silent": stay_silent,
     "wait": wait,
 }

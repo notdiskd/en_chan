@@ -1,5 +1,8 @@
 /src/.venv
+/src/.venv-windows-backup
 **/__pycache__
 account.session*
 .env
 bot_memory.db
+src/requirements.txt
+src/shell.nix
