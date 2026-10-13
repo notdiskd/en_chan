@@ -64,6 +64,16 @@ class Message(Base):
     reply_to_tg_id = Column(BigInteger, nullable=True)
 
 
+class ChatSummary(Base):
+    """Rolling, private continuity summary for one Telegram chat."""
+    __tablename__ = "chat_summaries"
+
+    chat_id = Column(BigInteger, primary_key=True)
+    summarized_through_id = Column(Integer, nullable=False, default=0)
+    content = Column(String, default="")
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 engine = create_async_engine("sqlite+aiosqlite:///./bot_memory.db")
 async_session = async_sessionmaker(engine, expire_on_commit=False)
 

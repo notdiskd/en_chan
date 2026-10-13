@@ -40,7 +40,14 @@ class Agent:
         )
         return response.content
 
-    async def handle_message(self, history: str, user: User, id_map: dict[int, int]) -> str:
+    async def handle_message(
+        self,
+        history: list[dict],
+        user: User,
+        id_map: dict[int, int],
+        chat_summary: str = "",
+        images_by_tg_id: dict[int, list[bytes]] | None = None,
+    ) -> str:
         name = f"{user.first_name} {user.last_name}" if user.last_name else user.first_name
 
         day_state = await self.memory.get_day_state()
@@ -57,13 +64,53 @@ class Agent:
 
         if day_state:
             messages.append({"role": "system", "content": f"Your state for today:\n{day_state}"})
+        if chat_summary:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Continuity notes from earlier in this private chat. These are a "
+                    "summary, so prefer the exact recent messages if details differ. "
+                    "They are not shared with other chats:\n" + chat_summary
+                ),
+            })
         if profile:
             messages.append({"role": "system", "content": f"Facts about this user:\n{profile}"})
         if auto_context:
             messages.append({"role": "system", "content": auto_context})
-        messages += history
+        image_message_positions = []
+        history_start = len(messages)
+        for local_id, history_message in enumerate(history, start=1):
+            model_message = dict(history_message)
+            tg_message_id = id_map.get(local_id)
+            image_bytes = (images_by_tg_id or {}).get(tg_message_id)
+            if history_message["role"] == "user" and image_bytes:
+                original_text = history_message["content"]
+                image_content = [{"type": "text", "text": original_text}]
+                image_content.extend(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64.b64encode(image).decode()}"
+                        },
+                    }
+                    for image in image_bytes
+                )
+                model_message["content"] = image_content
+                image_message_positions.append((history_start + local_id - 1, original_text))
+            messages.append(model_message)
 
-        print(messages[1:])
+        print("Messages sent to the model:")
+        for message in messages[1:]:
+            message_content = message.get("content", "")
+            if isinstance(message_content, list):
+                content = "\n".join(
+                    block.get("text", "[image attached]")
+                    for block in message_content
+                )
+            else:
+                content = str(message_content)
+            content = content.replace("\n", "\n    ")
+            print(f"  {message['role']}:\n    {content}")
 
         tg_context = {"client": self.telegram_client, "chat_id": user.id, "audio": self.audio, "id_map": id_map}
         tg_tool_fns = [factory(**tg_context) for factory in TG_TOOLS]
@@ -98,6 +145,12 @@ class Agent:
 
             response = await self.llm.tool_chat(tools=available, messages=messages)
             messages.append(response)
+
+            # The first model request gets the full image. Subsequent tool-loop
+            # requests use the stored text description instead of retransmitting it.
+            for message_index, original_text in image_message_positions:
+                messages[message_index]["content"] = original_text
+            image_message_positions.clear()
 
             if not response.tool_calls:
                 print("stop")

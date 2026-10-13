@@ -1,6 +1,8 @@
 from sqlalchemy import select
-from storage.db import Message, async_session
+from storage.db import ChatSummary, Message, async_session
 from datetime import datetime, timezone, timedelta
+
+MAX_MESSAGE_CONTEXT_CHARS = 12_000
 
 async def save_message(
     chat_id: int,
@@ -37,6 +39,33 @@ async def get_recent_messages(chat_id: int, limit: int = 20) -> list[Message]:
         messages = result.scalars().all()
     return list(reversed(messages))
 
+
+async def get_chat_summary(chat_id: int) -> ChatSummary | None:
+    async with async_session() as session:
+        return await session.get(ChatSummary, chat_id)
+
+
+async def get_messages_after(chat_id: int, message_id: int) -> list[Message]:
+    async with async_session() as session:
+        result = await session.execute(
+            select(Message)
+            .where(Message.chat_id == chat_id, Message.id > message_id)
+            .order_by(Message.id.asc())
+        )
+        return list(result.scalars().all())
+
+
+async def save_chat_summary(chat_id: int, through_id: int, content: str) -> None:
+    async with async_session() as session:
+        summary = await session.get(ChatSummary, chat_id)
+        if summary is None:
+            summary = ChatSummary(chat_id=chat_id)
+            session.add(summary)
+        summary.summarized_through_id = through_id
+        summary.content = content
+        summary.updated_at = datetime.now(timezone.utc)
+        await session.commit()
+
 def format_for_llm(messages: list[Message]) -> tuple[list[dict], dict[int, int]]:
     formatted = []
     id_map: dict[int, int] = {}          # local_id -> tg_message_id
@@ -64,9 +93,14 @@ def format_for_llm(messages: list[Message]) -> tuple[list[dict], dict[int, int]]
         elif msg.attachment_type == "voice":
             attachment_note = " [voice message]"
 
+        text = msg.text or ""
+        if len(text) > MAX_MESSAGE_CONTEXT_CHARS:
+            head_size = MAX_MESSAGE_CONTEXT_CHARS - 2_000
+            text = text[:head_size] + "\n[middle omitted]\n" + text[-2_000:]
+
         formatted.append({
             "role": msg.role,
-            "content": f"#{local_id} {time_note}{reply_note}{attachment_note} {msg.text}".strip()
+            "content": f"#{local_id} {time_note}{reply_note}{attachment_note} {text}".strip()
         })
 
     return formatted, id_map

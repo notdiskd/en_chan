@@ -6,7 +6,8 @@ from config import telegram
 from core.agent import Agent
 from collections import defaultdict
 from datetime import datetime, timezone
-from storage.messages import save_message, get_recent_messages, format_for_llm
+from storage.messages import save_message
+from core.conversation_context import build_chat_context
 from core.ai import OpenRouterClient
 import traceback
 
@@ -23,6 +24,7 @@ class UserBot:
         self._album_tasks: dict[int, asyncio.Task] = {}
         self._pending_ingests: dict[int, set[asyncio.Task]] = defaultdict(set)
         self._active_respond_tasks: dict[int, asyncio.Task] = {}
+        self._pending_response_images: dict[int, dict[int, list[bytes]]] = defaultdict(dict)
 
     async def start(self):
         await self.client.start()
@@ -46,7 +48,7 @@ class UserBot:
             if not dialog.is_user or dialog.id == self.my_id:
                 continue
 
-            messages = await self.client.get_messages(dialog.id, limit=50)
+            messages = await self.client.get_messages(dialog.id, limit=100)
 
             today_messages = []
             for msg in reversed(messages):
@@ -79,6 +81,8 @@ class UserBot:
 
     async def _dispatch(self, event, images: list[bytes], text: str | None = None):
         chat_id = event.chat_id
+        if images:
+            self._pending_response_images[chat_id][event.message.id] = images
 
         ingest_task = asyncio.create_task(self._ingest_message(event, images=images, text=text))
         self._pending_ingests[chat_id].add(ingest_task)
@@ -178,10 +182,24 @@ class UserBot:
             await self.client.send_read_acknowledge(chat)
             user = await event.get_sender()
 
-            db_messages = await get_recent_messages(chat_id, limit=20)
-            history, id_map = format_for_llm(db_messages)
+            summary, history, id_map = await build_chat_context(chat_id, self.llm)
+            pending_images = self._pending_response_images[chat_id]
+            images_by_tg_id = {
+                message_id: image_bytes
+                for message_id, image_bytes in pending_images.items()
+                if message_id in id_map.values()
+            }
 
-            await self.agent.handle_message(history, user, id_map=id_map)
+            await self.agent.handle_message(
+                history,
+                user,
+                id_map=id_map,
+                chat_summary=summary,
+                images_by_tg_id=images_by_tg_id,
+            )
+            # A successful response used the pending images once. Their textual
+            # descriptions remain in the database for later turns.
+            pending_images.clear()
 
         except asyncio.CancelledError:
             print(f"Respond cancelled for chat {chat_id} — a newer message arrived")
