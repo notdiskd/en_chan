@@ -9,6 +9,8 @@ from tools.tool_schema import function_to_tool
 from storage.memory import Memory
 from tools.memory_tools import (make_search_memory_tool, make_day_state_tools,
                                 make_profile_tool, make_shared_person_tools)
+from tools.proactive_tools import make_proactive_tools
+from storage.proactive import get_active_follow_ups
 import json
 
 ACTION_TOOL_NAMES = ("send_message", "send_voice_message", "stay_silent", "wait")
@@ -47,14 +49,20 @@ class Agent:
         id_map: dict[int, int],
         chat_summary: str = "",
         images_by_tg_id: dict[int, list[bytes]] | None = None,
+        proactive_chat_id: int | None = None,
     ) -> str:
         name = f"{user.first_name} {user.last_name}" if user.last_name else user.first_name
 
         day_state = await self.memory.get_day_state()
+        self_model = await self.memory.get_self_model()
         profile = await self.memory.format_profile(user.id)
+        active_follow_ups = (
+            await get_active_follow_ups(proactive_chat_id)
+            if proactive_chat_id is not None else []
+        )
         last_user_text = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
         auto_context = await self.memory.auto_retrieve(last_user_text, user_id=user.id) if last_user_text else None
-        current_date = datetime.now(timezone.utc).strftime("%A, %d %B %Y, %H:%M (UTC)")
+        current_date = datetime.now().astimezone().strftime("%A, %d %B %Y, %H:%M (local time)")
 
         messages=[
             {'role': 'system', 'content': prompts["character_prompt"]},
@@ -64,6 +72,48 @@ class Agent:
 
         if day_state:
             messages.append({"role": "system", "content": f"Your state for today:\n{day_state}"})
+        messages.append({
+            "role": "system",
+            "content": (
+                "You can schedule a follow-up message in this private chat when you "
+                "have promised to return to a topic or the user asked for one. "
+                "A scheduled message is sent automatically at the chosen local time. "
+                "You can list, update, or delete your active follow-ups. As the conversation "
+                "continues, notice when new information clearly changes one of your "
+                "commitments: update its topic, message, or time, or delete it if the matter "
+                "is clearly resolved or cancelled. Do not change reminders based on a vague "
+                "connection; when unsure, leave them unchanged. Do not mention the reminder "
+                "list unless it is relevant."
+                if proactive_chat_id else
+                "Follow-up scheduling is available only in private chats."
+            ),
+        })
+        if active_follow_ups:
+            reminder_lines = []
+            for reminder in active_follow_ups:
+                due_at = reminder["due_at"]
+                if due_at.tzinfo is None:
+                    due_at = due_at.replace(tzinfo=timezone.utc)
+                local_time = due_at.astimezone().strftime("%Y-%m-%d %H:%M local")
+                reminder_lines.append(
+                    f"ID {reminder['id']}: topic={reminder['topic']!r}; "
+                    f"message={reminder['message']!r}; due={local_time}"
+                )
+            messages.append({
+                "role": "system",
+                "content": "Your active follow-up commitments in this chat:\n"
+                           + "\n".join(reminder_lines),
+            })
+        if self_model:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Your evolving self-view, based on patterns you have noticed "
+                    "over time. It may contain tentative impressions; treat it as "
+                    "continuity context, not a script, and don't bring it up unless "
+                    f"relevant:\n{self_model}"
+                ),
+            })
         if chat_summary:
             messages.append({
                 "role": "system",
@@ -80,12 +130,21 @@ class Agent:
         image_message_positions = []
         history_start = len(messages)
         for local_id, history_message in enumerate(history, start=1):
-            model_message = dict(history_message)
+            model_message = {
+                "role": history_message["role"],
+                "content": history_message["content"],
+            }
             tg_message_id = id_map.get(local_id)
             image_bytes = (images_by_tg_id or {}).get(tg_message_id)
             if history_message["role"] == "user" and image_bytes:
                 original_text = history_message["content"]
-                image_content = [{"type": "text", "text": original_text}]
+                image_text = original_text
+                description = history_message.get("attachment_summary")
+                if description:
+                    image_text = image_text.replace(
+                        f" [image: {description}]", "", 1
+                    ).strip()
+                image_content = [{"type": "text", "text": image_text}]
                 image_content.extend(
                     {
                         "type": "image_url",
@@ -119,8 +178,9 @@ class Agent:
         replace_day_state, = make_day_state_tools(self.memory)
         update_profile = make_profile_tool(self.memory, user.id)
         shared_person_tools = make_shared_person_tools(self.memory, user.id, name)
+        proactive_tools = make_proactive_tools(proactive_chat_id)
         memory_tool_fns = [search_memory_tool, replace_day_state, update_profile,
-                           *shared_person_tools]
+                           *shared_person_tools, *proactive_tools]
 
         dynamic_fns = tg_tool_fns + memory_tool_fns
         dynamic_impls = {fn.__name__: fn for fn in dynamic_fns}
