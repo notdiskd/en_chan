@@ -111,4 +111,16 @@ def make_reflection_tools(memory):
         """
         return await memory.set_next_day_state(text)
 
-    return save_diary_entry, save_user_episode, set_next_day_carryover
+    async def replace_self_model(text: str) -> str:
+        """Replace En's compact, evolving self-view.
+
+        Include only En's own recurring interests, preferences, outlook, habits,
+        or goals. Keep uncertain patterns tentative. Never include names,
+        identifying details, or private facts about users.
+
+        Args:
+            text: The complete self-view, up to 1200 characters.
+        """
+        return await memory.replace_self_model(text)
+
+    return save_diary_entry, save_user_episode, set_next_day_carryover, replace_self_model

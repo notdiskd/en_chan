@@ -7,11 +7,13 @@ from sqlalchemy import delete, func, or_, select
 
 from config import prompts
 from core.ai import OpenRouterClient
-from storage.db import DayState, MemoryEntry, SharedPersonFact, UserProfile, async_session
+from storage.db import (DayState, EnSelfModel, MemoryEntry, SharedPersonFact,
+                        UserProfile, async_session)
 from tools.memory_tools import make_reflection_tools
 from tools.tool_schema import function_to_tool
 
 MAX_DAY_STATE_CHARS = 1500
+MAX_SELF_MODEL_CHARS = 1200
 MAX_PROFILE_FACTS = 20
 MAX_PROFILE_FACT_CHARS = 300
 AUTO_RETRIEVE_THRESHOLD = 0.55
@@ -177,6 +179,26 @@ class Memory:
         tomorrow = datetime.now(timezone.utc).date() + timedelta(days=1)
         return await self.set_day_state(text, state_date=tomorrow)
 
+    async def get_self_model(self) -> str:
+        async with async_session() as session:
+            row = await session.get(EnSelfModel, 1)
+            return row.content if row else ""
+
+    async def replace_self_model(self, text: str) -> str:
+        text = text.strip()
+        if len(text) > MAX_SELF_MODEL_CHARS:
+            return f"Self-model is too long ({len(text)}/{MAX_SELF_MODEL_CHARS} chars)."
+        async with async_session() as session:
+            row = await session.get(EnSelfModel, 1)
+            if row is None:
+                row = EnSelfModel(id=1, content=text)
+                session.add(row)
+            else:
+                row.content = text
+                row.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+        return "Self-model updated."
+
     async def get_profile(self, user_id: int) -> list[str]:
         async with async_session() as session:
             row = await session.get(UserProfile, user_id)
@@ -236,12 +258,15 @@ class Memory:
             return
 
         day_state = await self.get_day_state()
-        save_diary, save_episode, set_carryover = make_reflection_tools(self)
-        functions = (save_diary, save_episode, set_carryover)
+        self_model = await self.get_self_model()
+        save_diary, save_episode, set_carryover, replace_self_model = make_reflection_tools(self)
+        functions = (save_diary, save_episode, set_carryover, replace_self_model)
         tools = [function_to_tool(fn) for fn in functions]
         tool_impls = {fn.__name__: fn for fn in functions}
         messages = [{"role": "user", "content": prompts["reflection_prompt"].format(
-            day_state=day_state or "(empty)", summaries=day_summaries
+            day_state=day_state or "(empty)",
+            self_model=self_model or "(empty)",
+            summaries=day_summaries
         )}]
 
         for _ in range(8):

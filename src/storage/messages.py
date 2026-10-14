@@ -100,7 +100,8 @@ def format_for_llm(messages: list[Message]) -> tuple[list[dict], dict[int, int]]
 
         formatted.append({
             "role": msg.role,
-            "content": f"#{local_id} {time_note}{reply_note}{attachment_note} {text}".strip()
+            "content": f"#{local_id} {time_note}{reply_note}{attachment_note} {text}".strip(),
+            "attachment_summary": msg.attachment_summary,
         })
 
     return formatted, id_map

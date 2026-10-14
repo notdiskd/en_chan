@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Date, BigInteger, JSON, LargeBinary, Float
+from sqlalchemy import Column, Integer, String, DateTime, Date, BigInteger, JSON, LargeBinary, Float, Boolean
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from datetime import datetime, timezone
@@ -25,6 +25,15 @@ class DayState(Base):
     id = Column(Integer, primary_key=True, default=1) # эта строка всегда только одна существует
     content = Column(String, default="")
     state_date = Column(Date, nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class EnSelfModel(Base):
+    """A compact, global, evolving self-view for En."""
+    __tablename__ = "en_self_model"
+
+    id = Column(Integer, primary_key=True, default=1)
+    content = Column(String, default="")
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -72,6 +81,33 @@ class ChatSummary(Base):
     summarized_through_id = Column(Integer, nullable=False, default=0)
     content = Column(String, default="")
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ProactiveSettings(Base):
+    """Per-chat spontaneous-message cooldown, with older mode columns kept for compatibility."""
+    __tablename__ = "proactive_settings"
+
+    chat_id = Column(BigInteger, primary_key=True)
+    enabled = Column(Boolean, default=False, nullable=False)
+    auto_send = Column(Boolean, default=False, nullable=False)
+    timezone_name = Column(String, nullable=True)
+    spontaneous_after = Column("next_allowed_at", DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ProactiveFollowUp(Base):
+    """A message En explicitly committed to send later in a private chat."""
+    __tablename__ = "proactive_follow_ups"
+
+    id = Column(Integer, primary_key=True)
+    chat_id = Column(BigInteger, index=True, nullable=False)
+    purpose = Column(String, nullable=False)  # Why En promised to follow up.
+    due_at = Column(DateTime(timezone=True), index=True, nullable=False)
+    status = Column(String, default="pending", index=True, nullable=False)
+    message = Column("draft_text", String, nullable=True)  # Exact text sent when due.
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    sent_at = Column(DateTime(timezone=True), nullable=True)
 
 
 engine = create_async_engine("sqlite+aiosqlite:///./bot_memory.db")
