@@ -1,14 +1,20 @@
 import asyncio
 import random
 from datetime import datetime, timezone, timedelta
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, types
 from telethon.types import User
+from telethon.tl.functions.messages import GetMessagesReactionsRequest
 from commands.registry import get_registered_commands
 import commands.definitions
 from config import telegram, prompts
 from core.agent import Agent
 from collections import defaultdict
-from storage.messages import get_recent_messages, save_message
+from storage.messages import (
+    get_message_by_telegram_id,
+    get_recent_messages,
+    save_message,
+    save_reaction_event,
+)
 from core.conversation_context import build_chat_context
 from core.ai import OpenRouterClient
 from storage.proactive import (
@@ -32,6 +38,8 @@ class UserBot:
         self._pending_ingests: dict[int, set[asyncio.Task]] = defaultdict(set)
         self._active_respond_tasks: dict[int, asyncio.Task] = {}
         self._pending_response_images: dict[int, dict[int, list[bytes]]] = defaultdict(dict)
+        self._reaction_states: dict[tuple[int, int], set[tuple[str, datetime | None]]] = {}
+        self._started_at = datetime.now(timezone.utc)
 
     async def start(self):
         await self.client.start()
@@ -44,6 +52,7 @@ class UserBot:
         self.client.add_event_handler(self._handle_album, events.Album())
         self.client.add_event_handler(self._handle_command, events.NewMessage(outgoing=True))
         asyncio.create_task(self._proactive_loop())
+        asyncio.create_task(self._reaction_poll_loop())
 
         print("Userbot запущен")
         await self.client.run_until_disconnected()
@@ -65,6 +74,45 @@ class UserBot:
                     traceback.print_exc()
                 next_spontaneous_check = loop.time() + random.randint(45, 75) * 60
             await asyncio.sleep(60)
+
+    async def _reaction_poll_loop(self):
+        """Poll recent outgoing messages in case Telegram doesn't push reaction updates."""
+        while True:
+            await asyncio.sleep(25)
+            try:
+                async for dialog in self.client.iter_dialogs(limit=20):
+                    if not dialog.is_user or dialog.id == self.my_id:
+                        continue
+
+                    recent = await get_recent_messages(dialog.id, limit=30)
+                    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+                    outgoing_ids = []
+                    for message in reversed(recent):
+                        timestamp = message.timestamp
+                        if timestamp.tzinfo is None:
+                            timestamp = timestamp.replace(tzinfo=timezone.utc)
+                        if timestamp < cutoff:
+                            break
+                        if message.role == "assistant" and message.tg_message_id:
+                            outgoing_ids.append(message.tg_message_id)
+                        if len(outgoing_ids) >= 10:
+                            break
+                    if not outgoing_ids:
+                        continue
+
+                    result = await self.client(
+                        GetMessagesReactionsRequest(
+                            peer=dialog.input_entity,
+                            id=outgoing_ids,
+                        )
+                    )
+                    for update in getattr(result, "updates", ()):
+                        if isinstance(update, types.UpdateMessageReactions):
+                            await self._handle_reaction_update(update, polled=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"Reaction fallback poll error: {exc}")
 
     async def _process_spontaneous_message(
         self, target_chat_id: int | None = None
@@ -216,6 +264,151 @@ class UserBot:
             await finish_follow_up(follow_up_id, "failed")
             raise
 
+    async def _handle_reaction_update(self, update, *, polled=False):
+        if not isinstance(update, types.UpdateMessageReactions):
+            update_name = type(update).__name__
+            if "Reaction" in update_name:
+                print(f"Other Telegram reaction update received: {update_name}")
+            return
+        if not polled:
+            print(
+                "Telegram reaction update received: "
+                f"peer={getattr(update, 'peer', None)!r}, "
+                f"msg_id={getattr(update, 'msg_id', None)}"
+            )
+        if not isinstance(update.peer, types.PeerUser):
+            if not polled:
+                print("Reaction update ignored: peer is not a private user chat")
+            return
+        chat_id = update.peer.user_id
+        if chat_id == self.my_id:
+            if not polled:
+                print("Reaction update ignored: event belongs to our own account")
+            return
+
+        message = await get_message_by_telegram_id(chat_id, update.msg_id)
+        if message is None or message.role != "assistant":
+            if not polled:
+                print(
+                    "Reaction update ignored: message is not a saved outgoing message "
+                    f"(chat={chat_id}, msg_id={update.msg_id})"
+                )
+            return
+
+        reactions = getattr(update, "reactions", None)
+        recent_reactions = getattr(reactions, "recent_reactions", None) or []
+        if not recent_reactions and not polled:
+            telegram_message = await self.client.get_messages(chat_id, ids=update.msg_id)
+            current_reactions = getattr(telegram_message, "reactions", None)
+            recent_reactions = getattr(current_reactions, "recent_reactions", None) or []
+        if not recent_reactions and not polled:
+            print(
+                "Reaction update has no recent_reactions list "
+                f"(chat={chat_id}, msg_id={update.msg_id})"
+            )
+        user_reactions = []
+        for item in recent_reactions:
+            peer_id = getattr(item, "peer_id", None)
+            reaction_object = getattr(item, "reaction", None)
+            reaction = getattr(reaction_object, "emoticon", None)
+            if reaction is None:
+                document_id = getattr(reaction_object, "document_id", None)
+                reaction = f"custom emoji {document_id}" if document_id else "custom emoji"
+            if not polled:
+                print(
+                    "Reaction entry: "
+                    f"peer={peer_id!r}, my={getattr(item, 'my', None)}, "
+                    f"unread={getattr(item, 'unread', None)}, emoji={reaction}"
+                )
+            if (
+                isinstance(peer_id, types.PeerUser)
+                and peer_id.user_id == chat_id
+            ):
+                user_reactions.append((reaction, item.date, item))
+
+        state_key = (chat_id, update.msg_id)
+        current_state = {(reaction, date) for reaction, date, _ in user_reactions}
+        previous_state = self._reaction_states.get(state_key)
+        self._reaction_states[state_key] = current_state
+        if previous_state is None:
+            newly_added = [
+                item
+                for _, _, item in user_reactions
+                if item.unread
+                or (
+                    item.date is not None
+                    and (item.date.replace(tzinfo=timezone.utc)
+                         if item.date.tzinfo is None else item.date)
+                    >= self._started_at.replace(microsecond=0)
+                )
+            ]
+        else:
+            newly_added = [
+                item
+                for reaction, date, item in user_reactions
+                if (reaction, date) not in previous_state
+            ]
+        if not newly_added:
+            if not polled:
+                print(
+                    "Reaction update ignored: no new reaction from the other user "
+                    f"(chat={chat_id}, msg_id={update.msg_id})"
+                )
+            return
+
+        selected = max(
+            newly_added,
+            key=lambda item: item.date.timestamp() if item.date else 0,
+        )
+        emoji = getattr(selected.reaction, "emoticon", "a custom emoji")
+        event_text = (
+            f"User reacted {emoji} to your message: "
+            f"{(message.text or '[non-text message]')[:180]!r}."
+        )
+        saved = await save_reaction_event(
+            chat_id=chat_id,
+            tg_message_id=update.msg_id,
+            text=event_text,
+            timestamp=selected.date,
+        )
+        if not saved:
+            return
+
+        task = self._active_respond_tasks.get(chat_id)
+        if task and not task.done():
+            print(
+                "Reaction recorded but no response started: chat is already being "
+                f"processed (chat={chat_id})"
+            )
+            return
+
+        print(
+            f"Starting reaction response: chat={chat_id}, "
+            f"msg_id={update.msg_id}, emoji={emoji}"
+        )
+        reaction_task = asyncio.create_task(self._respond_to_reaction(chat_id))
+        self._active_respond_tasks[chat_id] = reaction_task
+
+    async def _respond_to_reaction(self, chat_id: int):
+        try:
+            user = await self.client.get_entity(chat_id)
+            if not isinstance(user, User) or user.bot:
+                return
+
+            summary, history, id_map = await build_chat_context(chat_id, self.llm)
+            await self.agent.handle_message(
+                history,
+                user,
+                id_map=id_map,
+                chat_summary=summary,
+                proactive_chat_id=chat_id if chat_id > 0 else None,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"Reaction response failed for chat {chat_id}: {exc}")
+            traceback.print_exc()
+
     #функции для внешних модулей
     async def get_today_summaries(self) -> str:
         today = datetime.now(timezone.utc).date()
@@ -357,6 +550,47 @@ class UserBot:
             user = await event.get_sender()
 
             summary, history, id_map = await build_chat_context(chat_id, self.llm)
+            referenced_messages = []
+            replied_to_id = event.message.reply_to_msg_id
+            if replied_to_id and replied_to_id not in id_map.values():
+                saved_reference = await get_message_by_telegram_id(chat_id, replied_to_id)
+                if saved_reference is not None:
+                    role = saved_reference.role
+                    content = saved_reference.text or ""
+                    if saved_reference.attachment_summary:
+                        content += f" [attachment: {saved_reference.attachment_summary}]"
+                    elif saved_reference.attachment_type:
+                        content += f" [{saved_reference.attachment_type} message]"
+                    timestamp = saved_reference.timestamp
+                    if timestamp.tzinfo is None:
+                        timestamp = timestamp.replace(tzinfo=timezone.utc)
+                    age = datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)
+                    time_note = (
+                        f"{int(age.total_seconds() // 86400)}d ago"
+                        if age.total_seconds() >= 86400
+                        else f"{int(age.total_seconds() // 3600)}h ago"
+                    )
+                else:
+                    telegram_reference = await self.client.get_messages(
+                        chat_id, ids=replied_to_id
+                    )
+                    if telegram_reference:
+                        role = "assistant" if telegram_reference.out else "user"
+                        content = telegram_reference.raw_text or ""
+                        if telegram_reference.media and not content:
+                            content = "[media attachment; description unavailable]"
+                        time_note = "older Telegram message"
+                    else:
+                        role = content = time_note = None
+
+                if role is not None:
+                    ref_id = "R1"
+                    id_map[ref_id] = replied_to_id
+                    referenced_messages.append({
+                        "ref_id": ref_id,
+                        "role": role,
+                        "content": f"[{time_note}] {content}".strip(),
+                    })
             pending_images = self._pending_response_images[chat_id]
             images_by_tg_id = {
                 message_id: image_bytes
@@ -371,6 +605,7 @@ class UserBot:
                 chat_summary=summary,
                 images_by_tg_id=images_by_tg_id,
                 proactive_chat_id=chat_id if chat_id > 0 else None,
+                referenced_messages=referenced_messages,
             )
             # A successful response used the pending images once. Their textual
             # descriptions remain in the database for later turns.

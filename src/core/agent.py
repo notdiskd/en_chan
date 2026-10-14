@@ -13,7 +13,13 @@ from tools.proactive_tools import make_proactive_tools
 from storage.proactive import get_active_follow_ups
 import json
 
-ACTION_TOOL_NAMES = ("send_message", "send_voice_message", "stay_silent", "wait")
+ACTION_TOOL_NAMES = (
+    "send_message",
+    "send_voice_message",
+    "react_to_message",
+    "stay_silent",
+    "wait",
+)
 THINK_TOOL_NAME = "think"
 MAX_INFO_CALLS = 7
 
@@ -46,10 +52,11 @@ class Agent:
         self,
         history: list[dict],
         user: User,
-        id_map: dict[int, int],
+        id_map: dict[int | str, int],
         chat_summary: str = "",
         images_by_tg_id: dict[int, list[bytes]] | None = None,
         proactive_chat_id: int | None = None,
+        referenced_messages: list[dict[str, str]] | None = None,
     ) -> str:
         name = f"{user.first_name} {user.last_name}" if user.last_name else user.first_name
 
@@ -123,6 +130,20 @@ class Agent:
                     "They are not shared with other chats:\n" + chat_summary
                 ),
             })
+        if referenced_messages:
+            reference_lines = [
+                f"#{item['ref_id']} ({item['role']}): {item['content']}"
+                for item in referenced_messages
+            ]
+            messages.append({
+                "role": "system",
+                "content": (
+                    "The latest incoming message directly replies to this older message, "
+                    "which is outside the recent history. Use it to understand what the "
+                    "user means. You may target it with reply_to='#R1' if a direct Telegram "
+                    "reply is appropriate:\n" + "\n".join(reference_lines)
+                ),
+            })
         if profile:
             messages.append({"role": "system", "content": f"Facts about this user:\n{profile}"})
         if auto_context:
@@ -171,7 +192,19 @@ class Agent:
             content = content.replace("\n", "\n    ")
             print(f"  {message['role']}:\n    {content}")
 
-        tg_context = {"client": self.telegram_client, "chat_id": user.id, "audio": self.audio, "id_map": id_map}
+        tg_context = {
+            "client": self.telegram_client,
+            "chat_id": user.id,
+            "audio": self.audio,
+            "id_map": id_map,
+            "message_roles": {
+                local_id: row["role"]
+                for local_id, row in enumerate(history, start=1)
+            } | {
+                item["ref_id"]: item["role"]
+                for item in (referenced_messages or [])
+            },
+        }
         tg_tool_fns = [factory(**tg_context) for factory in TG_TOOLS]
 
         search_memory_tool = make_search_memory_tool(self.memory, user.id)

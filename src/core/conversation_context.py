@@ -6,6 +6,7 @@ from storage.messages import (
     get_messages_after,
     save_chat_summary,
 )
+from datetime import datetime, timezone
 
 
 HISTORY_MESSAGE_TARGET = 30
@@ -15,6 +16,13 @@ SUMMARY_TRIGGER_CHARS = 30_000
 SUMMARY_BATCH_CHARS = 9_000
 MAX_SUMMARY_BATCHES_PER_TURN = 2
 MAX_SUMMARY_CHARS = 3_000
+
+
+def _chronology_key(message):
+    timestamp = message.timestamp or datetime.min.replace(tzinfo=timezone.utc)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp, message.id or 0
 
 
 def _message_text(message) -> str:
@@ -83,12 +91,16 @@ async def build_chat_context(chat_id: int, llm):
         old_messages, recent_messages = [], unsummarized
     else:
         old_messages, recent_messages = _select_recent_suffix(unsummarized)
+    recent_messages = sorted(recent_messages, key=_chronology_key)
 
     batches = _summary_batches(old_messages)[:MAX_SUMMARY_BATCHES_PER_TURN]
     summarized_messages = []
 
     for batch in batches:
-        transcript = "\n".join(line for _, line in batch)
+        transcript = "\n".join(
+            _message_text(message)
+            for message, _ in sorted(batch, key=lambda item: _chronology_key(item[0]))
+        )
         prompt = (
             "Update the compact continuity summary for this one private Telegram chat. "
             "Keep ongoing topics, plans and promises, stable preferences and boundaries, "
@@ -112,7 +124,10 @@ async def build_chat_context(chat_id: int, llm):
             break
 
     if summarized_messages:
-        summarized_through = summarized_messages[-1].id
+        # Summary batches are selected by database ID so this cursor always
+        # advances over a contiguous prefix, even when an event was inserted
+        # later but carries an earlier Telegram timestamp.
+        summarized_through = max(message.id for message in summarized_messages)
         await save_chat_summary(chat_id, summarized_through, summary_text)
 
     history, id_map = format_for_llm(recent_messages)

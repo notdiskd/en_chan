@@ -28,6 +28,37 @@ async def save_message(
         session.add(msg)
         await session.commit()
 
+
+async def save_reaction_event(
+    chat_id: int,
+    tg_message_id: int,
+    text: str,
+    timestamp: datetime | None = None,
+) -> bool:
+    """Persist one distinct reaction event, linked to the reacted-to message."""
+    event_time = timestamp or datetime.now(timezone.utc)
+    async with async_session() as session:
+        existing = await session.execute(
+            select(Message.id).where(
+                Message.chat_id == chat_id,
+                Message.role == "system",
+                Message.reply_to_tg_id == tg_message_id,
+                Message.text == text,
+                Message.timestamp == event_time,
+            ).limit(1)
+        )
+        if existing.scalar_one_or_none() is not None:
+            return False
+        session.add(Message(
+            chat_id=chat_id,
+            role="system",
+            text=text,
+            reply_to_tg_id=tg_message_id,
+            timestamp=event_time,
+        ))
+        await session.commit()
+        return True
+
 async def get_recent_messages(chat_id: int, limit: int = 20) -> list[Message]:
     async with async_session() as session:
         result = await session.execute(
@@ -38,6 +69,17 @@ async def get_recent_messages(chat_id: int, limit: int = 20) -> list[Message]:
         )
         messages = result.scalars().all()
     return list(reversed(messages))
+
+
+async def get_message_by_telegram_id(chat_id: int, tg_message_id: int) -> Message | None:
+    async with async_session() as session:
+        result = await session.execute(
+            select(Message).where(
+                Message.chat_id == chat_id,
+                Message.tg_message_id == tg_message_id,
+            ).limit(1)
+        )
+        return result.scalar_one_or_none()
 
 
 async def get_chat_summary(chat_id: int) -> ChatSummary | None:
@@ -79,6 +121,18 @@ def format_for_llm(messages: list[Message]) -> tuple[list[dict], dict[int, int]]
             ts = ts.replace(tzinfo=timezone.utc)
         time_note = _format_relative_time(now - ts)
 
+        # A system-role record without a Telegram ID is an internal event, not a
+        # message the model can reply to or target with Telegram tools.
+        if msg.role == "system" and msg.tg_message_id is None:
+            target_number = reverse_map.get(msg.reply_to_tg_id)
+            target_note = f" (about message #{target_number})" if target_number else ""
+            formatted.append({
+                "role": "system",
+                "content": f"{time_note} Telegram event{target_note}: {msg.text}",
+                "attachment_summary": None,
+            })
+            continue
+
         id_map[local_id] = msg.tg_message_id
         if msg.tg_message_id:
             reverse_map[msg.tg_message_id] = local_id
@@ -92,7 +146,6 @@ def format_for_llm(messages: list[Message]) -> tuple[list[dict], dict[int, int]]
             attachment_note = f" [image: {msg.attachment_summary}]"
         elif msg.attachment_type == "voice":
             attachment_note = " [voice message]"
-
         text = msg.text or ""
         if len(text) > MAX_MESSAGE_CONTEXT_CHARS:
             head_size = MAX_MESSAGE_CONTEXT_CHARS - 2_000
