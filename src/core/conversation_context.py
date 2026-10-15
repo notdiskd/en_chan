@@ -26,6 +26,17 @@ def _chronology_key(message):
 
 
 def _message_text(message) -> str:
+    if message.is_deleted:
+        timestamp = message.timestamp.isoformat() if message.timestamp else "unknown time"
+        attachment = ""
+        if message.attachment_type in ("image", "album") and message.attachment_summary:
+            attachment = f" [image: {message.attachment_summary}]"
+        elif message.attachment_type == "voice":
+            attachment = " [voice message]"
+        return (
+            f"[{timestamp}] system: Telegram message deleted; original author: "
+            f"{message.role}; previously seen content: {message.text or '[no text]'}{attachment}"
+        )
     attachment = ""
     if message.attachment_type in ("image", "album") and message.attachment_summary:
         attachment = f" [image: {message.attachment_summary}]"

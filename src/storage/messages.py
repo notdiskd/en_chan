@@ -82,6 +82,114 @@ async def get_message_by_telegram_id(chat_id: int, tg_message_id: int) -> Messag
         return result.scalar_one_or_none()
 
 
+async def get_message_by_telegram_id_anywhere(tg_message_id: int) -> Message | None:
+    """Private-chat message IDs are unique across this account's common ID sequence."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(Message).where(Message.tg_message_id == tg_message_id).limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
+async def get_messages_by_telegram_ids(
+    chat_id: int, tg_message_ids: list[int]
+) -> list[Message]:
+    if not tg_message_ids:
+        return []
+    async with async_session() as session:
+        result = await session.execute(
+            select(Message).where(
+                Message.chat_id == chat_id,
+                Message.tg_message_id.in_(tg_message_ids),
+            )
+        )
+        return list(result.scalars().all())
+
+
+async def _invalidate_summary_if_needed(session, chat_id: int, message: Message) -> None:
+    summary = await session.get(ChatSummary, chat_id)
+    if summary and message.id <= summary.summarized_through_id:
+        summary.summarized_through_id = 0
+        summary.content = ""
+        summary.updated_at = datetime.now(timezone.utc)
+
+
+async def record_message_edit(
+    chat_id: int,
+    tg_message_id: int,
+    new_text: str,
+    edited_at: datetime | None = None,
+) -> bool:
+    async with async_session() as session:
+        result = await session.execute(
+            select(Message).where(
+                Message.chat_id == chat_id,
+                Message.tg_message_id == tg_message_id,
+            ).limit(1)
+        )
+        message = result.scalar_one_or_none()
+        if message is None or message.is_deleted or (message.text or "") == new_text:
+            return False
+
+        old_text = message.text or ""
+        author = "you" if message.role == "assistant" else "the user"
+        event_text = (
+            f"Telegram edit event: {author} edited a message. "
+            f"Previous text: {old_text[:240]!r}; current text: {new_text[:240]!r}. "
+            "Consider the change; reply only if natural."
+        )
+        message.text = new_text
+        await _invalidate_summary_if_needed(session, chat_id, message)
+        session.add(Message(
+            chat_id=chat_id,
+            role="system",
+            text=event_text,
+            reply_to_tg_id=tg_message_id,
+            timestamp=edited_at or datetime.now(timezone.utc),
+        ))
+        await session.commit()
+        return True
+
+
+async def record_message_deletion(
+    chat_id: int,
+    tg_message_id: int,
+    deleted_at: datetime | None = None,
+    initiated_by: str = "user",
+) -> str | None:
+    async with async_session() as session:
+        result = await session.execute(
+            select(Message).where(
+                Message.chat_id == chat_id,
+                Message.tg_message_id == tg_message_id,
+            ).limit(1)
+        )
+        message = result.scalar_one_or_none()
+        if message is None or message.is_deleted:
+            return None
+
+        author = "your" if message.role == "assistant" else "the user's"
+        initiator = "En" if initiated_by == "assistant" else "the user"
+        event_text = (
+            f"Telegram reports that {author} message was deleted. "
+            f"The recorded initiator is {initiator}. "
+            f"The message had been saved in the conversation history: {(message.text or '[no text]')[:240]!r}. "
+            "Consider whether a response feels natural."
+        )
+        message.is_deleted = True
+        message.deleted_by = initiated_by
+        await _invalidate_summary_if_needed(session, chat_id, message)
+        session.add(Message(
+            chat_id=chat_id,
+            role="system",
+            text=event_text,
+            reply_to_tg_id=tg_message_id,
+            timestamp=deleted_at or datetime.now(timezone.utc),
+        ))
+        await session.commit()
+        return message.role
+
+
 async def get_chat_summary(chat_id: int) -> ChatSummary | None:
     async with async_session() as session:
         return await session.get(ChatSummary, chat_id)
@@ -129,6 +237,24 @@ def format_for_llm(messages: list[Message]) -> tuple[list[dict], dict[int, int]]
             formatted.append({
                 "role": "system",
                 "content": f"{time_note} Telegram event{target_note}: {msg.text}",
+                "attachment_summary": None,
+            })
+            continue
+
+        if msg.is_deleted:
+            if msg.tg_message_id:
+                reverse_map[msg.tg_message_id] = local_id
+            deleted_content = msg.text or "[no text]"
+            if msg.attachment_type in ("image", "album") and msg.attachment_summary:
+                deleted_content += f" [image: {msg.attachment_summary}]"
+            elif msg.attachment_type == "voice":
+                deleted_content += " [voice message]"
+            formatted.append({
+                "role": "system",
+                "content": (
+                    f"#{local_id} {time_note} [Telegram message deleted; "
+                    f"original author: {msg.role}; previously seen content: {deleted_content}]"
+                ),
                 "attachment_summary": None,
             })
             continue

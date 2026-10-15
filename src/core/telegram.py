@@ -11,7 +11,11 @@ from core.agent import Agent
 from collections import defaultdict
 from storage.messages import (
     get_message_by_telegram_id,
+    get_message_by_telegram_id_anywhere,
+    get_messages_by_telegram_ids,
     get_recent_messages,
+    record_message_deletion,
+    record_message_edit,
     save_message,
     save_reaction_event,
 )
@@ -34,11 +38,13 @@ class UserBot:
         self.agent = agent
         self.llm = llm
         self.agent.telegram_client = self.client
+        self.agent.userbot = self
         self.commands = get_registered_commands()
         self._pending_ingests: dict[int, set[asyncio.Task]] = defaultdict(set)
         self._active_respond_tasks: dict[int, asyncio.Task] = {}
         self._pending_response_images: dict[int, dict[int, list[bytes]]] = defaultdict(dict)
         self._reaction_states: dict[tuple[int, int], set[tuple[str, datetime | None]]] = {}
+        self._pending_self_mutations: set[tuple[int, int]] = set()
         self._started_at = datetime.now(timezone.utc)
 
     async def start(self):
@@ -51,6 +57,8 @@ class UserBot:
         self.client.add_event_handler(self._handle_new_message, events.NewMessage(incoming=True))
         self.client.add_event_handler(self._handle_album, events.Album())
         self.client.add_event_handler(self._handle_command, events.NewMessage(outgoing=True))
+        self.client.add_event_handler(self._handle_message_edited, events.MessageEdited())
+        self.client.add_event_handler(self._handle_messages_deleted, events.MessageDeleted())
         asyncio.create_task(self._proactive_loop())
         asyncio.create_task(self._reaction_poll_loop())
 
@@ -389,6 +397,70 @@ class UserBot:
         reaction_task = asyncio.create_task(self._respond_to_reaction(chat_id))
         self._active_respond_tasks[chat_id] = reaction_task
 
+    async def _handle_message_edited(self, event):
+        if not event.is_private or event.chat_id in (None, self.my_id):
+            return
+        message = event.message
+        saved = await get_message_by_telegram_id(event.chat_id, message.id)
+        if saved is None:
+            return
+        changed = await record_message_edit(
+            event.chat_id,
+            message.id,
+            message.raw_text or "",
+            edited_at=message.edit_date or datetime.now(timezone.utc),
+        )
+        if changed and saved.role == "user":
+            await self._schedule_social_event_response(event.chat_id)
+
+    async def _handle_messages_deleted(self, event):
+        for message_id in event.deleted_ids:
+            saved = None
+            chat_id = event.chat_id
+            if chat_id is not None:
+                if chat_id <= 0 or chat_id == self.my_id:
+                    continue
+                saved = await get_message_by_telegram_id(chat_id, message_id)
+            else:
+                # Private-chat deletion updates omit the peer. Message IDs in
+                # private chats share the account's message-ID sequence.
+                saved = await get_message_by_telegram_id_anywhere(message_id)
+                if saved is not None:
+                    chat_id = saved.chat_id
+            if saved is None or chat_id is None or chat_id <= 0 or chat_id == self.my_id:
+                continue
+            if (chat_id, message_id) in self._pending_self_mutations:
+                continue
+            author = await record_message_deletion(chat_id, message_id)
+            if author is not None:
+                await self._schedule_social_event_response(chat_id)
+
+    async def _schedule_social_event_response(self, chat_id: int):
+        active = self._active_respond_tasks.get(chat_id)
+        if active and not active.done():
+            return
+        task = asyncio.create_task(self._respond_to_social_event(chat_id))
+        self._active_respond_tasks[chat_id] = task
+
+    async def _respond_to_social_event(self, chat_id: int):
+        try:
+            user = await self.client.get_entity(chat_id)
+            if not isinstance(user, User) or user.bot:
+                return
+            summary, history, id_map = await build_chat_context(chat_id, self.llm)
+            await self.agent.handle_message(
+                history,
+                user,
+                id_map=id_map,
+                chat_summary=summary,
+                proactive_chat_id=chat_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"Telegram edit/delete response failed for chat {chat_id}: {exc}")
+            traceback.print_exc()
+
     async def _respond_to_reaction(self, chat_id: int):
         try:
             user = await self.client.get_entity(chat_id)
@@ -550,10 +622,33 @@ class UserBot:
             user = await event.get_sender()
 
             summary, history, id_map = await build_chat_context(chat_id, self.llm)
+            visible_tg_ids = set(id_map.values())
+            visible_rows = await get_messages_by_telegram_ids(
+                chat_id, list(visible_tg_ids)
+            )
+            rows_by_tg_id = {row.tg_message_id: row for row in visible_rows}
+            target_ids = []
+            seen_targets = set()
+            # Walk newest first so a direct reply in the current turn remains in
+            # view even if the context mentions many distinct older replies.
+            for local_id in range(len(history), 0, -1):
+                message_id = id_map.get(local_id)
+                row = rows_by_tg_id.get(message_id)
+                target_id = row.reply_to_tg_id if row else None
+                if target_id and target_id not in visible_tg_ids and target_id not in seen_targets:
+                    target_ids.append(target_id)
+                    seen_targets.add(target_id)
+            latest_reply_id = event.message.reply_to_msg_id
+            if (
+                latest_reply_id
+                and latest_reply_id not in visible_tg_ids
+                and latest_reply_id not in seen_targets
+            ):
+                target_ids.insert(0, latest_reply_id)
+
             referenced_messages = []
-            replied_to_id = event.message.reply_to_msg_id
-            if replied_to_id and replied_to_id not in id_map.values():
-                saved_reference = await get_message_by_telegram_id(chat_id, replied_to_id)
+            for target_id in reversed(target_ids[:10]):
+                saved_reference = await get_message_by_telegram_id(chat_id, target_id)
                 if saved_reference is not None:
                     role = saved_reference.role
                     content = saved_reference.text or ""
@@ -570,27 +665,29 @@ class UserBot:
                         if age.total_seconds() >= 86400
                         else f"{int(age.total_seconds() // 3600)}h ago"
                     )
+                    if saved_reference.is_deleted:
+                        role = "system"
+                        content = f"[deleted message; previously seen content: {content}]"
                 else:
                     telegram_reference = await self.client.get_messages(
-                        chat_id, ids=replied_to_id
+                        chat_id, ids=target_id
                     )
-                    if telegram_reference:
-                        role = "assistant" if telegram_reference.out else "user"
-                        content = telegram_reference.raw_text or ""
-                        if telegram_reference.media and not content:
-                            content = "[media attachment; description unavailable]"
-                        time_note = "older Telegram message"
-                    else:
-                        role = content = time_note = None
+                    if not telegram_reference:
+                        continue
+                    role = "assistant" if telegram_reference.out else "user"
+                    content = telegram_reference.raw_text or ""
+                    if telegram_reference.media and not content:
+                        content = "[media attachment; description unavailable]"
+                    time_note = "older Telegram message"
 
-                if role is not None:
-                    ref_id = "R1"
-                    id_map[ref_id] = replied_to_id
-                    referenced_messages.append({
-                        "ref_id": ref_id,
-                        "role": role,
-                        "content": f"[{time_note}] {content}".strip(),
-                    })
+                ref_id = f"R{len(referenced_messages) + 1}"
+                if role != "system":
+                    id_map[ref_id] = target_id
+                referenced_messages.append({
+                    "ref_id": ref_id,
+                    "role": role,
+                    "content": f"[{time_note}] {content}".strip(),
+                })
             pending_images = self._pending_response_images[chat_id]
             images_by_tg_id = {
                 message_id: image_bytes

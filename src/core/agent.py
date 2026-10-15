@@ -17,6 +17,9 @@ ACTION_TOOL_NAMES = (
     "send_message",
     "send_voice_message",
     "react_to_message",
+    "edit_message",
+    "delete_message",
+    "block_user",
     "stay_silent",
     "wait",
 )
@@ -29,6 +32,7 @@ class Agent:
         self.audio = audio
         self.memory = memory
         self.telegram_client = None
+        self.userbot = None
 
     async def describe_image(self, image_bytes: bytes, context_text: str = "") -> str:
         b64 = base64.b64encode(image_bytes).decode()
@@ -138,10 +142,12 @@ class Agent:
             messages.append({
                 "role": "system",
                 "content": (
-                    "The latest incoming message directly replies to this older message, "
-                    "which is outside the recent history. Use it to understand what the "
-                    "user means. You may target it with reply_to='#R1' if a direct Telegram "
-                    "reply is appropriate:\n" + "\n".join(reference_lines)
+                    "These are older messages referenced by replies in the recent history, "
+                    "outside the recent context window. References are numbered separately "
+                    "as #R1, #R2, and so on; each points to a different Telegram message. "
+                    "Use them to understand the conversation. You may target a specific one "
+                    "with reply_to='#R1' (or its corresponding #R number) when appropriate:\n"
+                    + "\n".join(reference_lines)
                 ),
             })
         if profile:
@@ -192,18 +198,21 @@ class Agent:
             content = content.replace("\n", "\n    ")
             print(f"  {message['role']}:\n    {content}")
 
+        message_roles = {
+            local_id: row["role"]
+            for local_id, row in enumerate(history, start=1)
+        } | {
+            item["ref_id"]: item["role"]
+            for item in (referenced_messages or [])
+        }
         tg_context = {
             "client": self.telegram_client,
+            "userbot": self.userbot,
             "chat_id": user.id,
             "audio": self.audio,
             "id_map": id_map,
-            "message_roles": {
-                local_id: row["role"]
-                for local_id, row in enumerate(history, start=1)
-            } | {
-                item["ref_id"]: item["role"]
-                for item in (referenced_messages or [])
-            },
+            "message_roles": message_roles,
+            "context_number_state": {"next": len(history) + 1},
         }
         tg_tool_fns = [factory(**tg_context) for factory in TG_TOOLS]
 
@@ -297,6 +306,8 @@ class Agent:
                     result = f"Error executing {fn_name}"
 
                 if fn_name == "stay_silent":
+                    return None
+                elif fn_name == "block_user" and str(result).startswith("User blocked."):
                     return None
                 elif fn_name in ("send_message", "send_voice_message"):
                     msg_count += 1

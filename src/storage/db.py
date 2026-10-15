@@ -69,6 +69,8 @@ class Message(Base):
     text = Column(String, default="")
     attachment_type = Column(String, nullable=True)
     attachment_summary = Column(String, nullable=True)
+    is_deleted = Column(Boolean, default=False, nullable=False)
+    deleted_by = Column(String, nullable=True)
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     reply_to_tg_id = Column(BigInteger, nullable=True)
 
@@ -117,6 +119,17 @@ async_session = async_sessionmaker(engine, expire_on_commit=False)
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        message_columns = {
+            row[1] for row in (await conn.exec_driver_sql("PRAGMA table_info(messages)")).all()
+        }
+        if "is_deleted" not in message_columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE messages ADD COLUMN is_deleted BOOLEAN NOT NULL DEFAULT 0"
+            )
+        if "deleted_by" not in message_columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE messages ADD COLUMN deleted_by VARCHAR"
+            )
 
     async with async_session() as session:
         existing = await session.get(DayState, 1)
